@@ -1,0 +1,24 @@
+# Vivado generated build artifacts
+.Xil/
+*.cache/
+*.hw/
+*.ip_user_files/
+*.runs/
+*.sim/
+*.jou
+*.log
+*.str
+
+# Bitstreams / checkpoints
+*.bit
+*.bin
+*.dcp
+
+# Simulation
+*.wdb
+*.wlf
+webtalk*.jou
+webtalk*.log
+
+# OS
+.DS_Store
