@@ -3,8 +3,8 @@ set_property -dict { PACKAGE_PIN W5 IOSTANDARD LVCMOS33 } [get_ports CLOCK]
 create_clock -add -name sys_clk_pin -period 10.00 -waveform {0 5} [get_ports CLOCK]
 
 ## BUTTONS
-set_property -dict { PACKAGE_PIN T18 IOSTANDARD LVCMOS33 } [get_ports BTNU]
-set_property -dict { PACKAGE_PIN U17 IOSTANDARD LVCMOS33 } [get_ports BTND]
+## (no matching port in top) set_property -dict { PACKAGE_PIN T18 IOSTANDARD LVCMOS33 } [get_ports BTNU]
+## (no matching port in top) set_property -dict { PACKAGE_PIN U17 IOSTANDARD LVCMOS33 } [get_ports BTND]
 set_property -dict { PACKAGE_PIN U18   IOSTANDARD LVCMOS33 } [get_ports BTNC]
 
 ## SWITCHES
