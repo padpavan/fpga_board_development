@@ -68,10 +68,11 @@ module clk_6p25m(
     output reg clk6p25m = 1'b0
 );
 
-    reg [3:0] count = 0;
+    // toggle every 8 cycles -> period 16 cycles -> 100 MHz / 16 = 6.25 MHz
+    reg [2:0] count = 0;
 
     always @(posedge CLOCK) begin
-        if (count == 4'd15) begin
+        if (count == 3'd7) begin
             count    <= 0;
             clk6p25m <= ~clk6p25m;
         end else begin
