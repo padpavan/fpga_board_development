@@ -58,15 +58,15 @@ Once M1's Dijkstra meets CONTRACT §4, re-run the cross-check with no skips:
 ## Engine behaviour others may rely on (M3)
 - **`start`** is accepted from IDLE or DONE **even while `step_en = 0`**, so `busy` always rises the cycle after `start`. The search itself only advances on `step_en` cycles.
 - **Latency:** INIT (clearing the state RAMs) takes NUM_CELLS = 192 cycles.
-  - Scan: each expansion costs about 198 cycles (a 193-cycle open-set scan + 4 neighbour cycles + overhead).
-  - Heap: each expansion costs about 5 to 20 cycles.
+  - Scan: each expansion costs about 202 cycles (a 193-cycle open-set scan + 8 neighbour cycles (NB + NB_WR per direction) + overhead).
+  - Heap: each expansion costs about 9 to 24 cycles.
   - Sample full-speed `cycles` (expansions are the same for both):
 
   | Maze | scan | heap | expansions |
   |---|---|---|---|
-  | open, 0 → 191 | 5564 | 606 | 27 |
-  | weighted | 19025 | 1337 | 95 |
-  | unreachable | 36624 | 2914 | 183 |
+  | open, 0 → 191 | 5668 | 653 | 27 |
+  | weighted | 19401 | 1523 | 95 |
+  | unreachable | 37356 | 3264 | 183 |
   | start == goal | 390 | 198 | 1 |
 
   For comparison, M1's current Dijkstra takes 30968 cycles on the weighted maze.
@@ -82,7 +82,7 @@ Once M1's Dijkstra meets CONTRACT §4, re-run the cross-check with no skips:
   | 2 | CHK_S | 8 | RECON |
   | 3 | CHK_G | 9 | FAIL |
   | 4 | SEED | 10 | DONE |
-  | 5 | POP | | |
+  | 5 | POP | 11 | NB_WR |
 
 ## Reusable modules (anyone may instantiate)
 - `manhattan.v`: combinational, same-cycle (`tb_manhattan` exhaustive PASS). The parameters default to the `arena_defs.vh` macros.
@@ -157,4 +157,5 @@ Add `-DTB_USE_HEAP=1` to `tb_astar_engine`, `tb_m2_test_top` and `tb_m2_crossche
   - Status bits cross into the 6.25 MHz domain through 2-FF synchronisers.
   - `cell_state`/`current` are read live, because a stale value only mis-colours a pixel for one frame.
   - That's acceptable for a test view; M3's dashboard follows the §8 snapshot rule.
+- 2026-10-23: Split the neighbour step into NB (evaluate + register the relax result) and NB_WR (write g/parent/state, push). The read → add → compare chain no longer runs into the RAM write enables and open-set push in one cycle, for 100 MHz timing. Adds 4 cycles per expansion. Paths and expansions are unchanged; all M2 testbenches PASS (scan and heap) and the Dijkstra cross-check still PASSES.
 - 2026-10-22: Did not edit M1's `pathfind_top.v`: it still lacks the shared `step_en`/`cell_rd_addr` ports (M1's §12 work). The snippet is above.

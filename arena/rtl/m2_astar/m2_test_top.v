@@ -32,7 +32,7 @@
 //
 // Expected on the board (hex on the 7-seg), from sim/mazes/*.ast.expect:
 //   open        cost 001A (26)  expansions 001B (27)
-//               cycles 15BC (5564) with USE_HEAP=0, 025E (606) with USE_HEAP=1
+//               cycles 1624 (5668) with USE_HEAP=0, 028D (653) with USE_HEAP=1
 //   weighted    cost 0017 (23)  expansions 005F (95)
 //   unreachable no_path,        expansions 00B7 (183)
 //   corridor    cost 0064 (100) expansions 0065 (101)

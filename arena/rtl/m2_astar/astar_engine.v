@@ -35,11 +35,18 @@
 //                     |            cell already VISITED (stale)-> POP
 //                     |            else close it: u = cell, expansions++
 //                     |            u == goal                   -> RECON
-//                     |  NB x4     relax up/down/left/right neighbour of u
+//                     |  NB x4     evaluate up/down/left/right neighbour of u,
+//                     |            register the relax result
+//                     |  NB_WR     write g/parent/state, push if improved
 //                     +----------- after dir 3
 //                        RECON     walk parent[] from goal to start,
 //                                  mark PATH, write path RAM   -> DONE (found)
 //                        FAIL      -> DONE (no_path)
+//
+// NB / NB_WR are split so the long read -> add -> compare chain (neighbour
+// index, cost/state/g LUTRAM reads, g_new, g_new < g_old) ends in a register
+// instead of running on into the open-set and RAM write enables: one cycle
+// at 100 MHz could not hold both.
 //
 // Closed cells are never reopened: Manhattan distance is consistent when
 // every cost >= 1, so the first time a cell is popped its g is optimal.
@@ -112,7 +119,8 @@ module astar_engine #(
                      S_NB       = 4'd7,
                      S_RECON    = 4'd8,
                      S_FAIL     = 4'd9,
-                     S_DONE     = 4'd10;
+                     S_DONE     = 4'd10,
+                     S_NB_WR    = 4'd11;
 
     reg [3:0]         state = S_IDLE;
     reg [INDEX_W-1:0] ptr   = {INDEX_W{1'b0}};  // INIT clear address
@@ -126,6 +134,12 @@ module astar_engine #(
     reg [DIST_W-1:0]  path_cells_r = {DIST_W{1'b0}};
     reg [DIST_W-1:0]  path_cost_r  = {DIST_W{1'b0}};
     reg [INDEX_W-1:0] current_r    = NONE;
+
+    // Neighbour result registered in NB, used by NB_WR.
+    reg [INDEX_W-1:0] nb_v_r   = {INDEX_W{1'b0}};
+    reg               nb_imp_r = 1'b0;
+    reg [DIST_W-1:0]  nb_g_r   = {DIST_W{1'b0}};
+    reg [DIST_W-1:0]  nb_f_r   = {DIST_W{1'b0}};
 
     assign path_cells = path_cells_r;
     assign path_cost  = path_cost_r;
@@ -184,8 +198,8 @@ module astar_engine #(
     wire seed_go   = step_en && (state == S_SEED) && os_ready;
     wire pop_got   = (state == S_POP_WAIT) && os_pop_valid;  // pop_valid includes step_en
     wire pop_fresh = pop_got && !os_pop_empty && (cs_rdata != `ARENA_CS_VISITED);
-    wire nb_go     = step_en && (state == S_NB) && os_ready;
-    wire nb_write  = nb_go && rx_improve;
+    wire nb_go     = step_en && (state == S_NB_WR) && os_ready;
+    wire nb_write  = nb_go && nb_imp_r;
     wire recon_go  = step_en && (state == S_RECON);
 
     wire start_ok  = start && (state == S_IDLE || state == S_DONE);
@@ -193,9 +207,9 @@ module astar_engine #(
     // ------------------------------------------------- open set (queue) --
     wire               os_clr      = (state == S_INIT) && (ptr == 0);
     wire               os_push     = seed_go || nb_write;
-    wire [INDEX_W-1:0] os_push_idx = (state == S_SEED) ? s_idx : nb_v;
-    wire [DIST_W-1:0]  os_push_f   = (state == S_SEED) ? h : rx_f_new;
-    wire [DIST_W-1:0]  os_push_g   = (state == S_SEED) ? {DIST_W{1'b0}} : rx_g_new;
+    wire [INDEX_W-1:0] os_push_idx = (state == S_SEED) ? s_idx : nb_v_r;
+    wire [DIST_W-1:0]  os_push_f   = (state == S_SEED) ? h : nb_f_r;
+    wire [DIST_W-1:0]  os_push_g   = (state == S_SEED) ? {DIST_W{1'b0}} : nb_g_r;
     wire               os_pop_req  = (state == S_POP);
 
     generate
@@ -232,7 +246,7 @@ module astar_engine #(
             S_INIT:     begin cs_we = init_go;   cs_waddr = ptr;        cs_wdata = `ARENA_CS_UNSEEN;   end
             S_SEED:     begin cs_we = seed_go;   cs_waddr = s_idx;      cs_wdata = `ARENA_CS_FRONTIER; end
             S_POP_WAIT: begin cs_we = pop_fresh; cs_waddr = os_pop_idx; cs_wdata = `ARENA_CS_VISITED;  end
-            S_NB:       begin cs_we = nb_write;  cs_waddr = nb_v;       cs_wdata = `ARENA_CS_FRONTIER; end
+            S_NB_WR:    begin cs_we = nb_write;  cs_waddr = nb_v_r;     cs_wdata = `ARENA_CS_FRONTIER; end
             S_RECON:    begin cs_we = recon_go;  cs_waddr = rc_cur;     cs_wdata = `ARENA_CS_PATH;     end
             default:    ;
         endcase
@@ -240,8 +254,8 @@ module astar_engine #(
 
     // g and parent: written when the start is seeded and on every improvement.
     wire               gp_we    = seed_go || nb_write;
-    wire [INDEX_W-1:0] gp_waddr = (state == S_SEED) ? s_idx : nb_v;
-    wire [DIST_W-1:0]  g_wdata  = (state == S_SEED) ? {DIST_W{1'b0}} : rx_g_new;
+    wire [INDEX_W-1:0] gp_waddr = (state == S_SEED) ? s_idx : nb_v_r;
+    wire [DIST_W-1:0]  g_wdata  = (state == S_SEED) ? {DIST_W{1'b0}} : nb_g_r;
     wire [INDEX_W-1:0] p_wdata  = (state == S_SEED) ? NONE : cur;
 
     // ------------------------------------------------------- memories ------
@@ -350,8 +364,17 @@ module astar_engine #(
                     end
                 end
 
-                S_NB: if (os_ready) begin                  // relax/push done by nb_write
-                    dir <= dir + 1'b1;
+                S_NB: begin                                // evaluate v = nb(u, dir)
+                    nb_v_r   <= nb_v;
+                    nb_imp_r <= rx_improve;
+                    nb_g_r   <= rx_g_new;
+                    nb_f_r   <= rx_f_new;
+                    state    <= S_NB_WR;
+                end
+
+                S_NB_WR: if (os_ready) begin               // relax/push done by nb_write
+                    dir   <= dir + 1'b1;
+                    state <= S_NB;
                     if (dir == 2'd3)
                         state <= S_POP;
                 end
