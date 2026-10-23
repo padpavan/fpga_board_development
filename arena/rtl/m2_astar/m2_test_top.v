@@ -32,7 +32,7 @@
 //
 // Expected on the board (hex on the 7-seg), from sim/mazes/*.ast.expect:
 //   open        cost 001A (26)  expansions 001B (27)
-//               cycles 1624 (5668) with USE_HEAP=0, 028D (653) with USE_HEAP=1
+//               cycles 1624 (5668)
 //   weighted    cost 0017 (23)  expansions 005F (95)
 //   unreachable no_path,        expansions 00B7 (183)
 //   corridor    cost 0064 (100) expansions 0065 (101)
@@ -42,8 +42,7 @@ module m2_test_top #(
     parameter DEBOUNCE_LOCKOUT = 20_000_000,   // 200 ms (tb uses a tiny value)
     parameter SLOW_W           = 16,           // slow motion: 100 MHz / 2^16 = 1.5 kHz steps
     parameter SLOWER_W         = 20,           // extra slow:  100 MHz / 2^20 = 95 Hz steps
-    parameter REFRESH_W        = 18,           // 7-seg multiplex rate
-    parameter USE_HEAP         = 0             // astar_engine open set: 0 scan, 1 heap
+    parameter REFRESH_W        = 18            // 7-seg multiplex rate
 ) (
     // ---- used by this test ----
     input  wire        clk,
@@ -79,6 +78,7 @@ module m2_test_top #(
     localparam COST_W    = `ARENA_COST_W;
     localparam DIST_W    = `ARENA_DIST_W;
     localparam CNT_W     = `ARENA_CNT_W;
+    localparam OLED_DIV  = `ARENA_OLED_CLK_DIV;
     localparam [INDEX_W-1:0] LAST = NUM_CELLS - 1;
 
     // ---- buttons (debounced -> 1-cycle pulses) and switches (2-FF sync) ----
@@ -153,7 +153,7 @@ module m2_test_top #(
     wire [3:0]         dbg_state;
     wire [INDEX_W-1:0] view_cell;              // cell the OLED is drawing (see below)
 
-    astar_engine #(.USE_HEAP(USE_HEAP)) u_ast (
+    astar_engine u_ast (
         .clk(clk), .rst(rst), .step_en(step_en),
         .load_we(t_state == T_LOAD), .load_addr(ld_ptr), .load_data(maze_cost),
         .start(t_state == T_START), .start_idx(maze_start), .goal_idx(maze_goal),
@@ -197,7 +197,7 @@ module m2_test_top #(
     wire [12:0] pixel_index;
     wire [15:0] pixel_data;
 
-    clk_div #(.DIV(`ARENA_OLED_CLK_DIV)) u_oled_clk (.clk(clk), .clk_out(clk6p25m));
+    clk_div #(.DIV(OLED_DIV)) u_oled_clk (.clk(clk), .clk_out(clk6p25m));
 
     // Search overlay only when the OLED shows the maze that was actually run.
     wire overlay_fast = (maze_sel == run_sel) && (busy || done);

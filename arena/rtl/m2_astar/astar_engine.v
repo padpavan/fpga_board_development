@@ -8,8 +8,7 @@
 //
 // Building blocks (each has its own self-checking testbench):
 //     ast_open_set    priority queue of discovered cells, pops lowest f
-//                     (then highest g, then lowest index); USE_HEAP = 1
-//                     swaps in ast_open_set_heap behind the same ports
+//                     (then highest g, then lowest index)
 //     ast_neighbour   cell + direction -> neighbour cell, in-grid flag
 //     ast_relax       g_new / f_new / "is this a better route?" for a neighbour
 //     manhattan       heuristic h(v, goal)
@@ -32,7 +31,6 @@
 //                        SEED      g[s]=0, push s with f = h(s)
 //                     +> POP       request the best open cell
 //                     |  POP_WAIT  set empty                   -> FAIL
-//                     |            cell already VISITED (stale)-> POP
 //                     |            else close it: u = cell, expansions++
 //                     |            u == goal                   -> RECON
 //                     |  NB x4     evaluate up/down/left/right neighbour of u,
@@ -59,12 +57,7 @@ module astar_engine #(
     parameter COST_W  = `ARENA_COST_W,
     parameter DIST_W  = `ARENA_DIST_W,
     parameter INDEX_W = `ARENA_INDEX_W,
-    parameter CNT_W   = `ARENA_CNT_W,
-    // Open-set implementation (M2 internal, not a CONTRACT parameter):
-    //   0 = ast_open_set      linear scan, ~193 cycles per pop
-    //   1 = ast_open_set_heap binary heap,  ~1-10 cycles per pop
-    // Both give identical paths and expansions; only `cycles` differs.
-    parameter USE_HEAP = 0
+    parameter CNT_W   = `ARENA_CNT_W
 ) (
     input  wire                 clk,
     input  wire                 rst,          // sync, active-high
@@ -107,6 +100,13 @@ module astar_engine #(
     localparam NUM_CELLS = COLS * ROWS;
     localparam [INDEX_W-1:0] LAST = NUM_CELLS - 1;
     localparam [INDEX_W-1:0] NONE = `ARENA_IDX_NONE;
+
+    // Shared codes from arena_defs.vh, given plain names for the code below.
+    localparam [COST_W-1:0] COST_WALL   = `ARENA_COST_WALL;
+    localparam [1:0]        CS_UNSEEN   = `ARENA_CS_UNSEEN,
+                            CS_FRONTIER = `ARENA_CS_FRONTIER,
+                            CS_VISITED  = `ARENA_CS_VISITED,
+                            CS_PATH     = `ARENA_CS_PATH;
 
     // ---------------------------------------------------------------- FSM --
     localparam [3:0] S_IDLE     = 4'd0,
@@ -186,9 +186,9 @@ module astar_engine #(
     // ------------------------------------------------- read-address muxes --
     wire [INDEX_W-1:0] cost_raddr = (state == S_CHK_S) ? s_idx :
                                     (state == S_CHK_G) ? t_idx : nb_v;
-    // POP_WAIT looks at the popped cell (stale check + its g); NB at v.
-    wire [INDEX_W-1:0] cs_raddr   = (state == S_POP_WAIT) ? os_pop_idx : nb_v;
-    wire [INDEX_W-1:0] g_raddr    = cs_raddr;
+    // POP_WAIT reads the popped cell's g; NB reads v's state and g.
+    wire [INDEX_W-1:0] cs_raddr   = nb_v;
+    wire [INDEX_W-1:0] g_raddr    = (state == S_POP_WAIT) ? os_pop_idx : nb_v;
     wire [INDEX_W-1:0] par_raddr  = rc_cur;
 
     // -------------------------------------- events (all need step_en = 1) --
@@ -197,7 +197,7 @@ module astar_engine #(
     wire init_go   = step_en && (state == S_INIT) && (ptr != 0 || os_ready);
     wire seed_go   = step_en && (state == S_SEED) && os_ready;
     wire pop_got   = (state == S_POP_WAIT) && os_pop_valid;  // pop_valid includes step_en
-    wire pop_fresh = pop_got && !os_pop_empty && (cs_rdata != `ARENA_CS_VISITED);
+    wire pop_fresh = pop_got && !os_pop_empty;              // a cell to expand
     wire nb_go     = step_en && (state == S_NB_WR) && os_ready;
     wire nb_write  = nb_go && nb_imp_r;
     wire recon_go  = step_en && (state == S_RECON);
@@ -212,45 +212,31 @@ module astar_engine #(
     wire [DIST_W-1:0]  os_push_g   = (state == S_SEED) ? {DIST_W{1'b0}} : nb_g_r;
     wire               os_pop_req  = (state == S_POP);
 
-    generate
-        if (USE_HEAP) begin : g_heap
-            ast_open_set_heap #(.NUM_CELLS(NUM_CELLS), .INDEX_W(INDEX_W), .DIST_W(DIST_W)) u_os (
-                .clk(clk), .rst(rst), .step_en(step_en),
-                .clr(os_clr), .push(os_push), .push_idx(os_push_idx),
-                .push_f(os_push_f), .push_g(os_push_g), .pop_req(os_pop_req),
-                .ready(os_ready), .pop_valid(os_pop_valid),
-                .pop_idx(os_pop_idx), .pop_empty(os_pop_empty)
-            );
-        end else begin : g_scan
-            ast_open_set #(.NUM_CELLS(NUM_CELLS), .INDEX_W(INDEX_W), .DIST_W(DIST_W)) u_os (
-                .clk(clk), .rst(rst), .step_en(step_en),
-                .clr(os_clr), .push(os_push), .push_idx(os_push_idx),
-                .push_f(os_push_f), .push_g(os_push_g), .pop_req(os_pop_req),
-                .ready(os_ready), .pop_valid(os_pop_valid),
-                .pop_idx(os_pop_idx), .pop_empty(os_pop_empty)
-            );
-        end
-    endgenerate
+    ast_open_set #(.NUM_CELLS(NUM_CELLS), .INDEX_W(INDEX_W), .DIST_W(DIST_W)) u_os (
+        .clk(clk), .rst(rst), .step_en(step_en),
+        .clr(os_clr), .push(os_push), .push_idx(os_push_idx),
+        .push_f(os_push_f), .push_g(os_push_g), .pop_req(os_pop_req),
+        .ready(os_ready), .pop_valid(os_pop_valid),
+        .pop_idx(os_pop_idx), .pop_empty(os_pop_empty)
+    );
 
     // ------------------------------------------- memory write ports --------
     // cell state: one writer per FSM state.
-    reg               cs_we;
-    reg [INDEX_W-1:0] cs_waddr;
-    reg [1:0]         cs_wdata;
+    //     INIT     ptr        <= UNSEEN
+    //     SEED     start      <= FRONTIER
+    //     POP_WAIT popped u   <= VISITED
+    //     NB_WR    improved v <= FRONTIER
+    //     RECON    path cell  <= PATH
+    wire cs_we = init_go || seed_go || pop_fresh || nb_write || recon_go;
 
-    always @(*) begin
-        cs_we    = 1'b0;
-        cs_waddr = ptr;
-        cs_wdata = `ARENA_CS_UNSEEN;
-        case (state)
-            S_INIT:     begin cs_we = init_go;   cs_waddr = ptr;        cs_wdata = `ARENA_CS_UNSEEN;   end
-            S_SEED:     begin cs_we = seed_go;   cs_waddr = s_idx;      cs_wdata = `ARENA_CS_FRONTIER; end
-            S_POP_WAIT: begin cs_we = pop_fresh; cs_waddr = os_pop_idx; cs_wdata = `ARENA_CS_VISITED;  end
-            S_NB_WR:    begin cs_we = nb_write;  cs_waddr = nb_v_r;     cs_wdata = `ARENA_CS_FRONTIER; end
-            S_RECON:    begin cs_we = recon_go;  cs_waddr = rc_cur;     cs_wdata = `ARENA_CS_PATH;     end
-            default:    ;
-        endcase
-    end
+    wire [INDEX_W-1:0] cs_waddr = (state == S_SEED)     ? s_idx      :
+                                  (state == S_POP_WAIT) ? os_pop_idx :
+                                  (state == S_NB_WR)    ? nb_v_r     :
+                                  (state == S_RECON)    ? rc_cur     : ptr;
+
+    wire [1:0]         cs_wdata = (state == S_POP_WAIT) ? CS_VISITED :
+                                  (state == S_RECON)    ? CS_PATH    :
+                                  (state == S_INIT)     ? CS_UNSEEN  : CS_FRONTIER;
 
     // g and parent: written when the start is seeded and on every improvement.
     wire               gp_we    = seed_go || nb_write;
@@ -339,8 +325,8 @@ module astar_engine #(
                         state <= S_CHK_S;
                 end
 
-                S_CHK_S: state <= (cost_rdata == `ARENA_COST_WALL) ? S_FAIL : S_CHK_G;
-                S_CHK_G: state <= (cost_rdata == `ARENA_COST_WALL) ? S_FAIL : S_SEED;
+                S_CHK_S: state <= (cost_rdata == COST_WALL) ? S_FAIL : S_CHK_G;
+                S_CHK_G: state <= (cost_rdata == COST_WALL) ? S_FAIL : S_SEED;
 
                 S_SEED: if (os_ready) state <= S_POP;      // push issued by seed_go
                 S_POP:  if (os_ready) state <= S_POP_WAIT; // pop_req taken this cycle
@@ -348,8 +334,6 @@ module astar_engine #(
                 S_POP_WAIT: if (os_pop_valid) begin
                     if (os_pop_empty)
                         state <= S_FAIL;                   // nothing left: unreachable
-                    else if (cs_rdata == `ARENA_CS_VISITED)
-                        state <= S_POP;                    // stale entry (heap only)
                     else begin
                         cur       <= os_pop_idx;           // close u (cs write above)
                         g_cur     <= g_rdata;

@@ -15,10 +15,6 @@
 // parameters so the simulation stays short.
 // Ends with "PASS: ..." or "FAIL: ..." (CONTRACT 10).
 //////////////////////////////////////////////////////////////////////////////
-`ifndef TB_USE_HEAP
-`define TB_USE_HEAP 0
-`endif
-
 module tb_m2_test_top;
     localparam LOCKOUT   = 8;
     localparam SLOW_W    = 3;                   // a step every 8 clocks in slow motion
@@ -41,8 +37,7 @@ module tb_m2_test_top;
     wire       oled_cs, oled_sdin, oled_sclk, oled_d_cn, oled_resn, oled_vccen, oled_pmoden;
     tri1       ps2_clk, ps2_data;
 
-    m2_test_top #(.DEBOUNCE_LOCKOUT(LOCKOUT), .SLOW_W(SLOW_W), .REFRESH_W(REFRESH_W),
-                  .USE_HEAP(`TB_USE_HEAP)) dut (
+    m2_test_top #(.DEBOUNCE_LOCKOUT(LOCKOUT), .SLOW_W(SLOW_W), .REFRESH_W(REFRESH_W)) dut (
         .clk(clk), .btnU(btnU), .btnC(btnC), .sw(sw),
         .led(led), .seg(seg), .dp(dp), .an(an),
         .btnL(1'b0), .btnR(1'b0), .btnD(1'b0),

@@ -28,11 +28,6 @@
 //       fresh run still works
 // Ends with "PASS: ..." or "FAIL: ..." (CONTRACT 10).
 //////////////////////////////////////////////////////////////////////////////
-`ifndef TB_USE_HEAP
-`define TB_USE_HEAP 0
-`endif
-// Open set under test: sim/run_m2.sh tb_astar_engine -DTB_USE_HEAP=1  for the heap.
-
 module tb_astar_engine;
     localparam COLS      = `ARENA_COLS;
     localparam ROWS      = `ARENA_ROWS;
@@ -64,7 +59,7 @@ module tb_astar_engine;
     wire [CNT_W-1:0]   cycles;
     wire [3:0]         dbg_state;
 
-    astar_engine #(.USE_HEAP(`TB_USE_HEAP)) dut (
+    astar_engine dut (
         .clk(clk), .rst(rst), .step_en(step_en),
         .load_we(load_we), .load_addr(load_addr), .load_data(load_data),
         .start(start), .start_idx(start_idx), .goal_idx(goal_idx),
@@ -260,8 +255,6 @@ module tb_astar_engine;
         @(negedge clk) rst = 1'b0;
         if (busy || done || found || no_path) fail("status not clear after rst");
 
-        $display("open set: %0s", `TB_USE_HEAP ? "binary heap (ast_open_set_heap)" : "linear scan (ast_open_set)");
-
         // ---------------- pass 0: full speed --------------------------------
         pass = 0;
         $display("pass 0: full speed");
@@ -319,7 +312,7 @@ module tb_astar_engine;
 
         $display("  %0d maze runs checked (2 passes)", n_runs);
         if (errors == 0)
-            $display("PASS: tb_astar_engine (%0s, 0 errors)", `TB_USE_HEAP ? "heap" : "scan");
+            $display("PASS: tb_astar_engine (0 errors)");
         else
             $display("FAIL: tb_astar_engine (%0d errors)", errors);
         $finish;

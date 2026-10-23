@@ -20,11 +20,6 @@
 //     sim/run_m2.sh tb_m2_crosscheck rtl/m1_pathfind/dijkstra_engine.v -DDIJ_CONTRACT_PORTS
 // Ends with "PASS: ..." or "FAIL: ..." (CONTRACT 10).
 //////////////////////////////////////////////////////////////////////////////
-`ifndef TB_USE_HEAP
-`define TB_USE_HEAP 0
-`endif
-// A* open set: add -DTB_USE_HEAP=1 to cross-check the heap version.
-
 module tb_m2_crosscheck;
     localparam NUM_CELLS = `ARENA_NUM_CELLS;
     localparam INDEX_W   = `ARENA_INDEX_W;
@@ -52,7 +47,7 @@ module tb_m2_crosscheck;
     wire [CNT_W-1:0]   ast_cycles;
     wire [1:0]         ast_cell_state;
 
-    astar_engine #(.USE_HEAP(`TB_USE_HEAP)) u_ast (
+    astar_engine u_ast (
         .clk(clk), .rst(rst), .step_en(step_en),
         .load_we(load_we), .load_addr(load_addr), .load_data(load_data),
         .start(start), .start_idx(start_idx), .goal_idx(goal_idx),
@@ -192,7 +187,6 @@ module tb_m2_crosscheck;
     initial begin
         repeat (3) @(posedge clk);
         @(negedge clk) rst = 1'b0;
-        $display("A* open set: %0s", `TB_USE_HEAP ? "binary heap" : "linear scan");
         if (LEGACY_DIJ)
             $display("Dijkstra: pre-contract port list (compile with -DDIJ_CONTRACT_PORTS once M1 meets CONTRACT 4)");
 

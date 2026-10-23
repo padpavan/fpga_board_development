@@ -62,6 +62,13 @@ module ast_oled_view #(
                       C_NOPATH  = 16'hF800,
                       C_IDLE    = 16'h18E3;
 
+    // Shared codes from arena_defs.vh, given plain names for the code below.
+    localparam [COST_W-1:0] COST_WALL   = `ARENA_COST_WALL,
+                            COST_OPEN   = `ARENA_COST_OPEN;
+    localparam [1:0]        CS_FRONTIER = `ARENA_CS_FRONTIER,
+                            CS_VISITED  = `ARENA_CS_VISITED,
+                            CS_PATH     = `ARENA_CS_PATH;
+
     // ---- pixel -> (x, y) -> (col, row) ----------------------------------------
     // Divisions by constants; at the 6.25 MHz OLED clock there is ample time.
     wire [12:0] x   = pixel_index % OLED_W;
@@ -91,15 +98,15 @@ module ast_oled_view #(
             pixel_data = C_GOAL;
         end else if (overlay && busy && cell_addr == current_idx) begin
             pixel_data = C_CURRENT;
-        end else if (overlay && cell_state == `ARENA_CS_PATH) begin
+        end else if (overlay && cell_state == CS_PATH) begin
             pixel_data = C_PATH;
-        end else if (cell_cost == `ARENA_COST_WALL) begin
+        end else if (cell_cost == COST_WALL) begin
             pixel_data = C_WALL;
-        end else if (overlay && cell_state == `ARENA_CS_VISITED) begin
+        end else if (overlay && cell_state == CS_VISITED) begin
             pixel_data = C_VISIT;
-        end else if (overlay && cell_state == `ARENA_CS_FRONTIER) begin
+        end else if (overlay && cell_state == CS_FRONTIER) begin
             pixel_data = C_FRONT;
-        end else if (cell_cost != `ARENA_COST_OPEN) begin
+        end else if (cell_cost != COST_OPEN) begin
             pixel_data = C_WEIGHT;
         end else begin
             pixel_data = C_BLACK;

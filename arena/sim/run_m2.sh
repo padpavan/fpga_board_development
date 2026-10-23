@@ -3,7 +3,7 @@
 #
 #   usage:  arena/sim/run_m2.sh <tb_name> [extra .v files / iverilog -D options...]
 #   e.g.    arena/sim/run_m2.sh tb_manhattan
-#           arena/sim/run_m2.sh tb_astar_engine -DTB_USE_HEAP=1
+#           arena/sim/run_m2.sh tb_m2_crosscheck rtl/m1_pathfind/dijkstra_engine.v
 #
 # Compiles arena/sim/<tb_name>.v together with every M2 RTL file and the
 # shared common/ blocks it uses, runs it from arena/ (so $readmemh paths like

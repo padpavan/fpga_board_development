@@ -4,18 +4,11 @@ Owner-editable (Tier 2). Binding rules live in `/CONTRACT.md`.
 
 ## Current state
 - `astar_engine.v` is the **real A\* engine** with the exact CONTRACT §4 port list plus one optional `dbg_state[3:0]` output.
-  - The extra parameter `USE_HEAP` (default 0) picks the open set: 0 = linear scan, 1 = binary heap. Both are fully verified and give identical paths and expansions; only `cycles` and area differ (see below).
+  - The open set is `ast_open_set` (linear scan over all cells).
   - `tb_astar_engine` PASS: every shared maze and start/goal pair, exact cost/cells/expansions vs `ref/`, the path RAM and `cell_state` checked, random `step_en`, restart from DONE, `rst` mid-run.
 - `tb_m2_crosscheck` PASS against M1's current `dijkstra_engine`: identical `path_cost` on 53 runs. A\* used 1935 expansions in total vs Dijkstra's 3994, and was never worse.
-- Yosys `synth_xilinx -family xc7`: no latches, `check -assert` clean, for both open sets.
-
-  | `USE_HEAP` | Logic LUTs | RAM64M (LUTRAM) | FFs | Approx. share of xc7a35t LUTs |
-  |---|---|---|---|---|
-  | 0, scan | 443 | 112 | 221 | about 4% |
-  | 1, heap | 1281 | 512 | 243 | about 16% |
-
-  The heap is bigger because of its two copies of a 1024 × 40-bit entry array.
-  - **Vivado timing at 100 MHz is not yet confirmed** (Vivado isn't available on macOS).
+- Yosys `synth_xilinx -family xc7`: no latches, `check -assert` clean. About 443 logic LUTs, 112 RAM64M (LUTRAM) and 221 FFs for the engine, roughly 4% of the xc7a35t's LUTs.
+- Vivado 2025.2, `m2_test_top` with the master XDC, synth + place + route on xc7a35tcpg236-1: **0 critical warnings, timing met at 100 MHz (WNS +0.309 ns)**. Whole board top: 1241 LUTs (376 as LUTRAM), 505 FFs.
 
 ## Integration: `pathfind_top` (CONTRACT §5)
 M1's `pathfind_top.v` still has the pre-contract ports. Once M1 adds the shared `step_en` and `cell_rd_addr` inputs (CONTRACT §12), add this. It's the agreed cross-folder edit; M2 will open the PR or M1 can paste it.
@@ -58,16 +51,15 @@ Once M1's Dijkstra meets CONTRACT §4, re-run the cross-check with no skips:
 ## Engine behaviour others may rely on (M3)
 - **`start`** is accepted from IDLE or DONE **even while `step_en = 0`**, so `busy` always rises the cycle after `start`. The search itself only advances on `step_en` cycles.
 - **Latency:** INIT (clearing the state RAMs) takes NUM_CELLS = 192 cycles.
-  - Scan: each expansion costs about 202 cycles (a 193-cycle open-set scan + 8 neighbour cycles (NB + NB_WR per direction) + overhead).
-  - Heap: each expansion costs about 9 to 24 cycles.
-  - Sample full-speed `cycles` (expansions are the same for both):
+  - Each expansion costs about 202 cycles (a 193-cycle open-set scan + 8 neighbour cycles (NB + NB_WR per direction) + overhead).
+  - Sample full-speed `cycles`:
 
-  | Maze | scan | heap | expansions |
-  |---|---|---|---|
-  | open, 0 → 191 | 5668 | 653 | 27 |
-  | weighted | 19401 | 1523 | 95 |
-  | unreachable | 37356 | 3264 | 183 |
-  | start == goal | 390 | 198 | 1 |
+  | Maze | cycles | expansions |
+  |---|---|---|
+  | open, 0 → 191 | 5668 | 27 |
+  | weighted | 19401 | 95 |
+  | unreachable | 37356 | 183 |
+  | start == goal | 390 | 1 |
 
   For comparison, M1's current Dijkstra takes 30968 cycles on the weighted maze.
 - **`cell_state`** has its own LUTRAM copy, so it's readable at any time with no effect on the search. All cells go to UNSEEN during INIT.
@@ -98,19 +90,12 @@ Once M1's Dijkstra meets CONTRACT §4, re-run the cross-check with no skips:
   - `g_new = g_u + cost_v` and `f_new = g_new + h_v`;
   - `improve = valid & !wall & !closed & (!seen | g_new < g_old)`;
   - seen/closed are decoded from the 2-bit cell state (PATH counts as closed).
-- `ast_open_set.v`: open set v1, linear scan. One slot per cell (`open` bit + `{f,g}` in LUTRAM), so push = insert or decrease-key and duplicates are impossible.
+- `ast_open_set.v`: the open set, a linear scan. One slot per cell (`open` bit + `{f,g}` in LUTRAM), so push = insert or decrease-key and duplicates are impossible.
   - Ports: `clk, rst, step_en, clr, push, push_idx, push_f, push_g, pop_req -> ready, pop_valid, pop_idx, pop_empty`.
   - Commands are accepted only when `ready && step_en`. clr wins over the others. push + pop_req in the same cycle is allowed (the scan sees the push).
   - Latency (step_en cycles): clr -> ready after NUM_CELLS; pop_req -> pop_valid after NUM_CELLS+1.
   - Pop order: lowest f, then highest g, then lowest idx. The RAMs aren't reset, so clr before first use.
-- `ast_open_set_heap.v`: open set v2, binary min-heap with the same ports (`tb_ast_open_set_heap` PASS).
-  - Entries are `{f, g, idx}` in two identical LUTRAM copies (two read ports), 2^CAP_W = 1024 slots.
-  - Lazy deletion: a re-push adds a better entry and the stale one is skipped by the engine.
-  - Capacity proof: a run pushes at most 1 + 712 directed edges = 713 entries, so it can never overflow.
-  - Latency: clr 1 cycle; pop_valid the cycle after pop_req (sift-down then runs in the background); ready again within CAP_W+1 cycles.
-  - Do not assert push and pop_req together (v1 tolerates it, v2 performs only the push).
-  - The order is total (f, then g desc, then idx), so the real expansion sequence equals the scan's exactly.
-- The engine waits for `ready` before every push and pop and skips stale (already VISITED) pops. That makes it correct for either open set.
+- The engine waits for `ready` before every push and pop. A popped cell is never already VISITED: closed cells are never pushed again, and the scan keeps one slot per cell.
 
 ## Board bring-up (not part of the arena build)
 - Files: `m2_test_top.v`, helpers `ast_test_maze.v`, `ast_sevenseg_hex.v` and `ast_oled_view.v`.
@@ -134,7 +119,7 @@ Owned by M2, published in CONTRACT §4.3 (Tier 1). Change them only through the 
   - From cycle k+1: `busy = 1`, and each such cycle with `step_en = 1` adds 1.
   - The last busy cycle (the one whose edge drops `busy` and raises `done`) is counted. That is "up to and including the cycle `done` rises".
   - When `done` is first seen high, `cycles` is final and then holds. It is identical whether or not the run was paused.
-- `expansions` = +1 in each cycle a node is closed/settled, the goal included (only when `step_en = 1`). Stale heap pops are not expansions.
+- `expansions` = +1 in each cycle a node is closed/settled, the goal included (only when `step_en = 1`).
 - Both saturate at all-ones and clear when the next `start` is accepted. `rst` clears them too.
 
 ## Tests (run from `arena/`)
@@ -142,20 +127,19 @@ Owned by M2, published in CONTRACT §4.3 (Tier 1). Change them only through the 
 python3 ref/gen_mazes.py                 # regenerate mazes + expected values, self-check
 sim/run_m2.sh tb_<name> [extra .v]       # compile + run one testbench, exit 0 only on PASS
 ```
-`tb_ast_absdiff`, `tb_manhattan`, `tb_ast_sat_counter`, `tb_ast_neighbour`, `tb_ast_relax`, `tb_ast_open_set`, `tb_ast_open_set_heap`, `tb_astar_engine`, `tb_ast_test_maze`, `tb_ast_sevenseg_hex`, `tb_ast_oled_view`, `tb_m2_test_top`, and `tb_m2_crosscheck` (with `rtl/m1_pathfind/dijkstra_engine.v`).
-Add `-DTB_USE_HEAP=1` to `tb_astar_engine`, `tb_m2_test_top` and `tb_m2_crosscheck` to test the heap build.
+`tb_ast_absdiff`, `tb_manhattan`, `tb_ast_sat_counter`, `tb_ast_neighbour`, `tb_ast_relax`, `tb_ast_open_set`, `tb_astar_engine`, `tb_ast_test_maze`, `tb_ast_sevenseg_hex`, `tb_ast_oled_view`, `tb_m2_test_top`, and `tb_m2_crosscheck` (with `rtl/m1_pathfind/dijkstra_engine.v`).
 
 ## Decisions log
 - 2026-10-22: Reference model in `arena/ref/` (`arena_ref.py`, `gen_mazes.py`). The shared `.expect` format is unchanged; A*-exact values (cells, expansions) go in a separate `<name>.ast.expect`.
-- 2026-10-22: Open set = fixed internal interface. v1 is a linear scan over all cells; v2 is a binary min-heap behind the same ports (stretch).
+- 2026-10-22: Open set = a linear scan over all cells.
 - 2026-10-22: A* tie-break = lowest f, then highest g, then lowest index. Closed nodes are never reopened (Manhattan is consistent since every cost >= 1).
 - 2026-10-22: Path reconstruction is a single pass. The path RAM is written goal-first and read through a flipped address, so addr 0 = start as the contract requires.
 - 2026-10-22: `start` is accepted while paused, so the "busy the cycle after start" rule holds regardless of `step_en`.
-- 2026-10-22: Heap open set added behind `USE_HEAP` (default 0 until Vivado timing at 100 MHz is confirmed for it). It uses a full (f, g, idx) order, so expansions match the scan and the reference exactly.
 - 2026-10-22: `m2_test_top` uses the master XDC (every XDC port exists, the unused ones tied off as CONTRACT §9 requires of `arena_top`). The private XDC was removed.
 - 2026-10-22: Added a test-only OLED view to `m2_test_top`.
   - Status bits cross into the 6.25 MHz domain through 2-FF synchronisers.
   - `cell_state`/`current` are read live, because a stale value only mis-colours a pixel for one frame.
   - That's acceptable for a test view; M3's dashboard follows the §8 snapshot rule.
-- 2026-10-23: Split the neighbour step into NB (evaluate + register the relax result) and NB_WR (write g/parent/state, push). The read → add → compare chain no longer runs into the RAM write enables and open-set push in one cycle, for 100 MHz timing. Adds 4 cycles per expansion. Paths and expansions are unchanged; all M2 testbenches PASS (scan and heap) and the Dijkstra cross-check still PASSES.
+- 2026-10-23: Split the neighbour step into NB (evaluate + register the relax result) and NB_WR (write g/parent/state, push). The read → add → compare chain no longer runs into the RAM write enables and open-set push in one cycle, for 100 MHz timing. Adds 4 cycles per expansion. Paths and expansions are unchanged; all M2 testbenches PASS and the Dijkstra cross-check still PASSES.
 - 2026-10-22: Did not edit M1's `pathfind_top.v`: it still lacks the shared `step_en`/`cell_rd_addr` ports (M1's §12 work). The snippet is above.
+- 2026-10-23: Simplified M2 to course-level Verilog (intro course, taught up to modular FSMs). Removed the binary-heap open set (`ast_open_set_heap`, `USE_HEAP`, the `generate` block, and the engine's stale-pop path, which only the heap needed). Replaced the `function`s and the default-then-override `always @(*)` blocks with `assign` + `?:`. `` `ARENA_* `` macros now appear only in the `` `include `` line and the parameter/localparam declarations at the top of each module; module bodies use plain names. Paths, expansions and cycles are unchanged. Every M2 testbench and the Dijkstra cross-check PASS under Vivado xsim 2025.2.

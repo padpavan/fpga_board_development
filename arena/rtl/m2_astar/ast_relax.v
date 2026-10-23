@@ -45,10 +45,16 @@ module ast_relax #(
     output wire [DIST_W-1:0]   f_new,
     output wire                improve
 );
+    // Shared codes from arena_defs.vh, given plain names for the code below.
+    localparam [COST_W-1:0] COST_WALL  = `ARENA_COST_WALL;
+    localparam [1:0]        CS_UNSEEN  = `ARENA_CS_UNSEEN,
+                            CS_VISITED = `ARENA_CS_VISITED,
+                            CS_PATH    = `ARENA_CS_PATH;
+
     // Decode the search state.
-    wire v_seen   = (cs_v != `ARENA_CS_UNSEEN);
-    wire v_closed = (cs_v == `ARENA_CS_VISITED) || (cs_v == `ARENA_CS_PATH);
-    wire v_wall   = (cost_v == `ARENA_COST_WALL);
+    wire v_seen   = (cs_v != CS_UNSEEN);
+    wire v_closed = (cs_v == CS_VISITED) || (cs_v == CS_PATH);
+    wire v_wall   = (cost_v == COST_WALL);
 
     // Arithmetic: zero-extend the 4-bit cost before adding.
     assign g_new = g_u + {{(DIST_W-COST_W){1'b0}}, cost_v};

@@ -13,7 +13,7 @@
 // decrease-key for free, and the set can never hold duplicates.
 //
 // ---------------------------------------------------------------------------
-// Interface (frozen; open-set v2 = binary heap must keep these ports)
+// Interface (used by astar_engine)
 //
 //   ready      1 = idle, a command may be issued this cycle
 //   clr        empty the set.              ready again NUM_CELLS cycles later

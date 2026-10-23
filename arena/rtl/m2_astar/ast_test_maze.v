@@ -25,9 +25,9 @@ module ast_test_maze #(
 ) (
     input  wire [1:0]         sel,
     input  wire [INDEX_W-1:0] idx,
-    output reg  [COST_W-1:0]  cost,
-    output reg  [INDEX_W-1:0] start_idx,
-    output reg  [INDEX_W-1:0] goal_idx
+    output wire [COST_W-1:0]  cost,
+    output wire [INDEX_W-1:0] start_idx,
+    output wire [INDEX_W-1:0] goal_idx
 );
     localparam [COST_W-1:0] WALL  = `ARENA_COST_WALL;
     localparam [COST_W-1:0] OPEN  = `ARENA_COST_OPEN;
@@ -39,46 +39,44 @@ module ast_test_maze #(
     localparam BOX_COL  = COLS - 4;
     localparam LAST_ROW = (ROWS % 2 == 0) ? ROWS - 2 : ROWS - 1;  // corridor end row
 
+    // Start / goal of each maze.
+    localparam [INDEX_W-1:0] OPEN_GOAL     = COLS * ROWS - 1;
+    localparam [INDEX_W-1:0] WEIGHT_START  = 5 * COLS + 2;
+    localparam [INDEX_W-1:0] WEIGHT_GOAL   = 5 * COLS + COLS - 3;
+    localparam [INDEX_W-1:0] UNREACH_GOAL  = BOX_ROW * COLS + BOX_COL;
+    localparam [INDEX_W-1:0] CORRIDOR_GOAL = LAST_ROW * COLS + (((LAST_ROW / 2) % 2 == 1) ? 0 : COLS - 1);
+
     wire [INDEX_W-1:0] row = idx / COLS;
     wire [INDEX_W-1:0] col = idx % COLS;
 
-    // Small helper: is (rw, cl) the cell (r, c)?  row/col are passed in
-    // explicitly so always @(*) sees them as inputs of the block.
-    function at(input [INDEX_W-1:0] rw, input [INDEX_W-1:0] cl,
-                input integer r, input integer c);
-        at = (rw == r) && (cl == c);
-    endfunction
-
     // ---- per-maze cell cost ------------------------------------------------
-    reg [COST_W-1:0] c_weighted, c_unreach, c_corridor;
-    reg              in_box;
-    reg [INDEX_W-1:0] gap_col;
+    // weighted: heavy column except its bottom cell, plus a few mid-weight
+    // cells (same list as gen_mazes.maze_weighted)
+    wire [COST_W-1:0] c_weighted =
+        ((row == 2 && col == 3) || (row == 3 && col == 3)) ? 4'd4  :
+        (row == 8  && col == 11)                           ? 4'd3  :
+        (row == 9  && col == 12)                           ? 4'd7  :
+        (row == 10 && col == 5)                            ? 4'd2  :
+        (col == MID_COL && row != ROWS - 1)                ? HEAVY : OPEN;
 
-    always @(*) begin
-        // weighted: heavy column except its bottom cell, plus a few
-        // mid-weight cells (same list as gen_mazes.maze_weighted)
-        c_weighted = OPEN;
-        if (col == MID_COL && row != ROWS - 1)        c_weighted = HEAVY;
-        if (at(row, col, 2, 3) || at(row, col, 3, 3)) c_weighted = 4'd4;
-        if (at(row, col, 8, 11))                      c_weighted = 4'd3;
-        if (at(row, col, 9, 12))                      c_weighted = 4'd7;
-        if (at(row, col, 10, 5))                      c_weighted = 4'd2;
+    // unreachable: 3x3 ring of walls around (BOX_ROW, BOX_COL)
+    wire in_box     = (row + 1 >= BOX_ROW) && (row <= BOX_ROW + 1) &&
+                      (col + 1 >= BOX_COL) && (col <= BOX_COL + 1);
+    wire box_centre = (row == BOX_ROW) && (col == BOX_COL);
+    wire [COST_W-1:0] c_unreach = (in_box && !box_centre) ? WALL : OPEN;
 
-        // unreachable: 3x3 ring of walls around (BOX_ROW, BOX_COL)
-        in_box    = (row + 1 >= BOX_ROW) && (row <= BOX_ROW + 1) &&
-                    (col + 1 >= BOX_COL) && (col <= BOX_COL + 1);
-        c_unreach = (in_box && !at(row, col, BOX_ROW, BOX_COL)) ? WALL : OPEN;
+    // corridor: odd rows are walls except one gap, alternating right/left
+    wire [INDEX_W-1:0] gap_col    = row[1] ? 0 : COLS - 1;   // (row/2) odd -> left edge
+    wire [COST_W-1:0]  c_corridor = (row[0] && col != gap_col) ? WALL : OPEN;
 
-        // corridor: odd rows are walls except one gap, alternating right/left
-        gap_col    = row[1] ? 0 : COLS - 1;     // (row/2) odd -> left edge
-        c_corridor = (row[0] && col != gap_col) ? WALL : OPEN;
+    // ---- select the maze -----------------------------------------------------
+    assign cost      = (sel == 2'd0) ? OPEN       :
+                       (sel == 2'd1) ? c_weighted :
+                       (sel == 2'd2) ? c_unreach  : c_corridor;
 
-        case (sel)
-            2'd0: begin cost = OPEN;       start_idx = 0;            goal_idx = COLS * ROWS - 1;             end
-            2'd1: begin cost = c_weighted; start_idx = 5 * COLS + 2; goal_idx = 5 * COLS + COLS - 3;         end
-            2'd2: begin cost = c_unreach;  start_idx = 0;            goal_idx = BOX_ROW * COLS + BOX_COL;    end
-            default: begin cost = c_corridor; start_idx = 0;
-                           goal_idx = LAST_ROW * COLS + (((LAST_ROW / 2) % 2 == 1) ? 0 : COLS - 1);       end
-        endcase
-    end
+    assign start_idx = (sel == 2'd1) ? WEIGHT_START : 0;
+
+    assign goal_idx  = (sel == 2'd0) ? OPEN_GOAL    :
+                       (sel == 2'd1) ? WEIGHT_GOAL  :
+                       (sel == 2'd2) ? UNREACH_GOAL : CORRIDOR_GOAL;
 endmodule
