@@ -71,14 +71,17 @@ module bfs_engine #(
     localparam [INDEX_W-1:0] COLS_W = COLS;
     localparam [INDEX_W-1:0] ROWS_W = ROWS;
 
-    // FSM states (finishing returns to S_IDLE with done = 1)
+    // FSM states.  Every finish goes through S_FINISH, which lets the last
+    // registered memory write land before done rises, then returns to S_IDLE
+    // with done = 1.
     localparam [2:0] S_IDLE        = 3'd0,
                      S_CLEAR       = 3'd1,
                      S_START_ENQ   = 3'd2,
                      S_POP         = 3'd3,
                      S_EXPAND      = 3'd4,
                      S_RECON_COUNT = 3'd5,
-                     S_RECON_STORE = 3'd6;
+                     S_RECON_STORE = 3'd6,
+                     S_FINISH      = 3'd7;
 
     reg [2:0]        state;
     reg [INDEX_W-1:0] clr_addr, head, tail;
@@ -100,6 +103,10 @@ module bfs_engine #(
     wire              vis_rdata;
     wire [COST_W-1:0] cost_rdata;
     wire [INDEX_W-1:0] q_rdata, par_rdata;
+
+    // write ports are registered, so a slot enqueued on the previous step is
+    // still pending when S_POP reads it: forward it
+    wire [INDEX_W-1:0] q_head = (q_we && q_waddr == head) ? q_wdata : q_rdata;
 
     // -------- combinational neighbour generation (from `current`) ----------
     wire [INDEX_W-1:0] cur_row = current / COLS;
@@ -130,27 +137,27 @@ module bfs_engine #(
     );
 
     grid_mem #(.ADDR_W(INDEX_W), .DATA_W(1)) u_visited (
-        .clk(clk), .we(vis_we), .waddr(vis_waddr), .wdata(vis_wdata),
+        .clk(clk), .we(vis_we && step_en), .waddr(vis_waddr), .wdata(vis_wdata),
         .raddr(nb_sel), .rdata(vis_rdata)
     );
 
     grid_mem #(.ADDR_W(INDEX_W), .DATA_W(INDEX_W)) u_parent (
-        .clk(clk), .we(par_we), .waddr(par_waddr), .wdata(par_wdata),
+        .clk(clk), .we(par_we && step_en), .waddr(par_waddr), .wdata(par_wdata),
         .raddr(recon_cur), .rdata(par_rdata)
     );
 
     grid_mem #(.ADDR_W(INDEX_W), .DATA_W(INDEX_W)) u_queue (
-        .clk(clk), .we(q_we), .waddr(q_waddr), .wdata(q_wdata),
+        .clk(clk), .we(q_we && step_en), .waddr(q_waddr), .wdata(q_wdata),
         .raddr(head), .rdata(q_rdata)
     );
 
     grid_mem #(.ADDR_W(INDEX_W), .DATA_W(INDEX_W)) u_path (
-        .clk(clk), .we(path_we), .waddr(path_waddr), .wdata(path_wdata),
+        .clk(clk), .we(path_we && step_en), .waddr(path_waddr), .wdata(path_wdata),
         .raddr(path_rd_addr), .rdata(path_rd_data)
     );
 
     grid_mem #(.ADDR_W(INDEX_W), .DATA_W(`ARENA_CS_W)) u_cell_state (
-        .clk(clk), .we(cs_we), .waddr(cs_waddr), .wdata(cs_wdata),
+        .clk(clk), .we(cs_we && step_en), .waddr(cs_waddr), .wdata(cs_wdata),
         .raddr(cell_rd_addr), .rdata(cell_state)
     );
 
@@ -173,12 +180,16 @@ module bfs_engine #(
             path_we     <= 1'b0;
             cs_we       <= 1'b0;
         end else begin
-            // defaults: no memory writes this cycle
-            vis_we  <= 1'b0;
-            par_we  <= 1'b0;
-            q_we    <= 1'b0;
-            path_we <= 1'b0;
-            cs_we   <= 1'b0;
+            // defaults: no memory writes next step.  A write issued on the
+            // last step before a pause is held (and gated by step_en at the
+            // memory) until the engine resumes.
+            if (step_en) begin
+                vis_we  <= 1'b0;
+                par_we  <= 1'b0;
+                q_we    <= 1'b0;
+                path_we <= 1'b0;
+                cs_we   <= 1'b0;
+            end
 
             // cycles: every step_en cycle after start, up to and including
             // the cycle done rises (busy is still 1 on that edge)
@@ -221,9 +232,7 @@ module bfs_engine #(
                         if (clr_addr == NUM_CELLS - 1) begin
                             if (ep_wall || ep_hit || ep_out) begin
                                 no_path <= 1'b1;
-                                busy    <= 1'b0;
-                                done    <= 1'b1;
-                                state   <= S_IDLE;
+                                state   <= S_FINISH;
                             end else begin
                                 state   <= S_START_ENQ;
                             end
@@ -253,19 +262,17 @@ module bfs_engine #(
                     S_POP: begin
                         if (count == 0) begin
                             no_path <= 1'b1;
-                            busy    <= 1'b0;
-                            done    <= 1'b1;
-                            state   <= S_IDLE;
+                            state   <= S_FINISH;
                         end else begin
-                            current  <= q_rdata;
+                            current  <= q_head;
                             head     <= head + 1'b1;
                             count    <= count - 1'b1;
                             cs_we    <= 1'b1;
-                            cs_waddr <= q_rdata;
+                            cs_waddr <= q_head;
                             cs_wdata <= `ARENA_CS_VISITED;
                             if (expansions != DIST_MAX)
                                 expansions <= expansions + 1'b1;
-                            if (q_rdata == g_idx) begin
+                            if (q_head == g_idx) begin
                                 found     <= 1'b1;
                                 recon_cur <= g_idx;
                                 recon_len <= 0;
@@ -321,13 +328,17 @@ module bfs_engine #(
                         if (recon_cur == s_idx) begin
                             path_cells <= recon_len + 1'b1;
                             path_cost  <= recon_len;
-                            busy       <= 1'b0;
-                            done       <= 1'b1;
-                            state      <= S_IDLE;
+                            state      <= S_FINISH;
                         end else begin
                             recon_idx <= recon_idx - 1'b1;
                             recon_cur <= par_rdata;
                         end
+                    end
+
+                    S_FINISH: begin
+                        busy  <= 1'b0;
+                        done  <= 1'b1;
+                        state <= S_IDLE;
                     end
 
                     default: state <= S_IDLE;

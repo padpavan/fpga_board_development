@@ -65,13 +65,17 @@ module dijkstra_engine #(
     localparam [INDEX_W-1:0] COLS_W = COLS;
     localparam [INDEX_W-1:0] ROWS_W = ROWS;
 
-    // FSM states (finishing returns to S_IDLE with done = 1)
+    // FSM states.  Every finish goes through S_FINISH, which lets the last
+    // registered memory write land before done rises, then returns to S_IDLE
+    // with done = 1.
     localparam [2:0] S_IDLE        = 3'd0,
                      S_INIT        = 3'd1,
                      S_SELECT      = 3'd2,
                      S_RELAX       = 3'd3,
                      S_RECON_COUNT = 3'd4,
-                     S_RECON_STORE = 3'd5;
+                     S_RECON_STORE = 3'd5,
+                     S_FINISH      = 3'd6,
+                     S_RELAX_WR    = 3'd7;
 
     reg [2:0]         state;
     reg [INDEX_W-1:0] clr_addr, scan_addr, best_idx, sel;
@@ -81,6 +85,12 @@ module dijkstra_engine #(
     reg [1:0]         dir;
     reg               ep_wall;     // start or goal seen as a wall during S_INIT
 
+    // relax pipeline: S_RELAX registers the neighbour reads, S_RELAX_WR
+    // compares and writes (keeps the RAM-read -> add -> compare path short)
+    reg               rx_ok;
+    reg [INDEX_W-1:0] rx_idx;
+    reg [DIST_W-1:0]  rx_new, rx_old;
+
     // memory write ports
     reg               dist_we;    reg [INDEX_W-1:0] dist_waddr; reg [DIST_W-1:0]  dist_wdata;
     reg               vis_we;     reg [INDEX_W-1:0] vis_waddr;  reg               vis_wdata;
@@ -89,9 +99,9 @@ module dijkstra_engine #(
     reg               cs_we;      reg [INDEX_W-1:0] cs_waddr;   reg [1:0]         cs_wdata;
 
     // memory read data
-    wire               vis_rdata;
+    wire               vis_rdata, vis_scan;
     wire [COST_W-1:0]  cost_rdata;
-    wire [DIST_W-1:0]  dist_rdata;
+    wire [DIST_W-1:0]  dist_rdata, dist_scan;
     wire [INDEX_W-1:0] par_rdata;
 
     // -------- combinational neighbour generation (from `sel`) --------------
@@ -111,8 +121,6 @@ module dijkstra_engine #(
                         (sel_col < (COLS - 1));
 
     // -------- read-address muxes -------------------------------------------
-    wire [INDEX_W-1:0] dist_raddr = (state == S_SELECT) ? scan_addr : nb_sel;
-    wire [INDEX_W-1:0] vis_raddr  = (state == S_SELECT) ? scan_addr : nb_sel;
     wire [INDEX_W-1:0] cost_raddr = (state == S_INIT)   ? clr_addr  : nb_sel;
     wire [INDEX_W-1:0] par_raddr  = recon_cur;
 
@@ -132,27 +140,39 @@ module dijkstra_engine #(
     );
 
     grid_mem #(.ADDR_W(INDEX_W), .DATA_W(DIST_W)) u_dist (
-        .clk(clk), .we(dist_we), .waddr(dist_waddr), .wdata(dist_wdata),
-        .raddr(dist_raddr), .rdata(dist_rdata)
+        .clk(clk), .we(dist_we && step_en), .waddr(dist_waddr), .wdata(dist_wdata),
+        .raddr(nb_sel), .rdata(dist_rdata)
+    );
+
+    // second read port for the S_SELECT scan (same writes), so the scan path
+    // doesn't go through the neighbour-address logic
+    grid_mem #(.ADDR_W(INDEX_W), .DATA_W(DIST_W)) u_dist_scan (
+        .clk(clk), .we(dist_we && step_en), .waddr(dist_waddr), .wdata(dist_wdata),
+        .raddr(scan_addr), .rdata(dist_scan)
     );
 
     grid_mem #(.ADDR_W(INDEX_W), .DATA_W(1)) u_visited (
-        .clk(clk), .we(vis_we), .waddr(vis_waddr), .wdata(vis_wdata),
-        .raddr(vis_raddr), .rdata(vis_rdata)
+        .clk(clk), .we(vis_we && step_en), .waddr(vis_waddr), .wdata(vis_wdata),
+        .raddr(nb_sel), .rdata(vis_rdata)
+    );
+
+    grid_mem #(.ADDR_W(INDEX_W), .DATA_W(1)) u_visited_scan (
+        .clk(clk), .we(vis_we && step_en), .waddr(vis_waddr), .wdata(vis_wdata),
+        .raddr(scan_addr), .rdata(vis_scan)
     );
 
     grid_mem #(.ADDR_W(INDEX_W), .DATA_W(INDEX_W)) u_parent (
-        .clk(clk), .we(par_we), .waddr(par_waddr), .wdata(par_wdata),
+        .clk(clk), .we(par_we && step_en), .waddr(par_waddr), .wdata(par_wdata),
         .raddr(par_raddr), .rdata(par_rdata)
     );
 
     grid_mem #(.ADDR_W(INDEX_W), .DATA_W(INDEX_W)) u_path (
-        .clk(clk), .we(path_we), .waddr(path_waddr), .wdata(path_wdata),
+        .clk(clk), .we(path_we && step_en), .waddr(path_waddr), .wdata(path_wdata),
         .raddr(path_rd_addr), .rdata(path_rd_data)
     );
 
     grid_mem #(.ADDR_W(INDEX_W), .DATA_W(`ARENA_CS_W)) u_cell_state (
-        .clk(clk), .we(cs_we), .waddr(cs_waddr), .wdata(cs_wdata),
+        .clk(clk), .we(cs_we && step_en), .waddr(cs_waddr), .wdata(cs_wdata),
         .raddr(cell_rd_addr), .rdata(cell_state)
     );
 
@@ -177,12 +197,16 @@ module dijkstra_engine #(
             path_we     <= 1'b0;
             cs_we       <= 1'b0;
         end else begin
-            // defaults: no memory writes this cycle
-            dist_we <= 1'b0;
-            vis_we  <= 1'b0;
-            par_we  <= 1'b0;
-            path_we <= 1'b0;
-            cs_we   <= 1'b0;
+            // defaults: no memory writes next step.  A write issued on the
+            // last step before a pause is held (and gated by step_en at the
+            // memory) until the engine resumes.
+            if (step_en) begin
+                dist_we <= 1'b0;
+                vis_we  <= 1'b0;
+                par_we  <= 1'b0;
+                path_we <= 1'b0;
+                cs_we   <= 1'b0;
+            end
 
             // cycles: every step_en cycle after start, up to and including
             // the cycle done rises (busy is still 1 on that edge)
@@ -228,9 +252,7 @@ module dijkstra_engine #(
                         if (clr_addr == NUM_CELLS - 1) begin
                             if (ep_wall || ep_hit || ep_out) begin
                                 no_path <= 1'b1;
-                                busy    <= 1'b0;
-                                done    <= 1'b1;
-                                state   <= S_IDLE;
+                                state   <= S_FINISH;
                             end else begin
                                 scan_addr <= 0;
                                 best_dist <= INF;
@@ -244,18 +266,16 @@ module dijkstra_engine #(
 
                     S_SELECT: begin
                         if (scan_addr < NUM_CELLS) begin
-                            if (!vis_rdata && (dist_rdata < best_dist)) begin
-                                best_dist <= dist_rdata;
+                            if (!vis_scan && (dist_scan < best_dist)) begin
+                                best_dist <= dist_scan;
                                 best_idx  <= scan_addr;
-                                sel_dist  <= dist_rdata;
+                                sel_dist  <= dist_scan;
                             end
                             scan_addr <= scan_addr + 1'b1;
                         end else begin
                             if (best_dist == INF) begin
                                 no_path <= 1'b1;
-                                busy    <= 1'b0;
-                                done    <= 1'b1;
-                                state   <= S_IDLE;
+                                state   <= S_FINISH;
                             end else begin
                                 sel       <= best_idx;
                                 vis_we    <= 1'b1;
@@ -281,25 +301,32 @@ module dijkstra_engine #(
                     end
 
                     S_RELAX: begin
-                        if (nb_ok && !vis_rdata && (cost_rdata != `ARENA_COST_WALL)) begin
-                            if (new_dist < dist_rdata) begin
-                                dist_we    <= 1'b1;
-                                dist_waddr <= nb_sel;
-                                dist_wdata <= new_dist;
-                                par_we     <= 1'b1;
-                                par_waddr  <= nb_sel;
-                                par_wdata  <= sel;
-                                cs_we      <= 1'b1;
-                                cs_waddr   <= nb_sel;
-                                cs_wdata   <= `ARENA_CS_FRONTIER;
-                            end
+                        rx_ok  <= nb_ok && !vis_rdata && (cost_rdata != `ARENA_COST_WALL);
+                        rx_idx <= nb_sel;
+                        rx_new <= new_dist;
+                        rx_old <= dist_rdata;
+                        state  <= S_RELAX_WR;
+                    end
+
+                    S_RELAX_WR: begin
+                        if (rx_ok && (rx_new < rx_old)) begin
+                            dist_we    <= 1'b1;
+                            dist_waddr <= rx_idx;
+                            dist_wdata <= rx_new;
+                            par_we     <= 1'b1;
+                            par_waddr  <= rx_idx;
+                            par_wdata  <= sel;
+                            cs_we      <= 1'b1;
+                            cs_waddr   <= rx_idx;
+                            cs_wdata   <= `ARENA_CS_FRONTIER;
                         end
                         if (dir == 2'd3) begin
                             scan_addr <= 0;
                             best_dist <= INF;
                             state     <= S_SELECT;
                         end else begin
-                            dir <= dir + 1'b1;
+                            dir   <= dir + 1'b1;
+                            state <= S_RELAX;
                         end
                     end
 
@@ -323,13 +350,17 @@ module dijkstra_engine #(
                         cs_wdata   <= `ARENA_CS_PATH;
                         if (recon_cur == s_idx) begin
                             path_cells <= recon_len + 1'b1;
-                            busy       <= 1'b0;
-                            done       <= 1'b1;
-                            state      <= S_IDLE;
+                            state      <= S_FINISH;
                         end else begin
                             recon_idx <= recon_idx - 1'b1;
                             recon_cur <= par_rdata;
                         end
+                    end
+
+                    S_FINISH: begin
+                        busy  <= 1'b0;
+                        done  <= 1'b1;
+                        state <= S_IDLE;
                     end
 
                     default: state <= S_IDLE;
