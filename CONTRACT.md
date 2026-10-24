@@ -1,6 +1,6 @@
 # CONTRACT.md: FPGA Pathfinding Arena (Group S1_18)
 
-**Version 1.0** · Basys 3 (xc7a35tcpg236-1) · Verilog-2001
+**Version 1.1** · Basys 3 (xc7a35tcpg236-1) · Verilog-2001
 
 This file is the integration contract for the three members' work. Read it fully **before** writing any project code, whether you're a human or an AI agent. It defines only what crosses a member boundary. Everything inside a member's own block is that member's choice.
 
@@ -65,7 +65,7 @@ arena/                      <- THE integrated project
   sim/                      <- all testbenches tb_<module>.v
   sim/mazes/                <- shared test mazes + expected results
   ref/                      <- M2's software reference model (Python)
-GPT5*, GPT7*                <- standalone course labs; NOT part of the arena build
+GPT7*                       <- standalone course lab; NOT part of the arena build
 ```
 
 - **Exactly one top module, `arena_top`,** owned by M3. Nobody else names a module `top` or `arena_top` inside `arena/`.
@@ -302,7 +302,7 @@ The code already in the repo predates this contract. These changes bring it into
 - [ ] Write the reference model in `arena/ref/` and the expected results for the shared mazes.
 
 **M3**
-- [ ] `ip/`: add Digilent `MouseCtl.vhd` **and its dependency `Ps2Interface.vhd`**. The copy in `GPT5.srcs` is missing `Ps2Interface` and won't synthesise without it.
+- [x] `ip/`: add Digilent `MouseCtl.vhd` **and its dependency `Ps2Interface.vhd`**. Both are now in `arena/ip/`; `MouseCtl` moved from the old GPT5 lab, which has been removed.
 - [ ] Create `arena_top.v` with every XDC port; instantiate `clk_div` as `u_oled_clk` and uncomment the `create_generated_clock` line in the XDC.
 - [ ] `maze_ram`, maze generator, mouse interface, VGA, OLED dashboard, `sys_ctrl`.
 
@@ -312,3 +312,4 @@ The code already in the repo predates this contract. These changes bring it into
 | Version | Date | Change |
 |---|---|---|
 | 1.0 | 2026-10-19 | Initial contract, derived from proposal GPT6_S1_18 and existing M1 code. |
+| 1.1 | 2026-10-24 | §1: GPT5 lab removed (its `Oled_Display.v` was a duplicate of `common/`; its `MouseCtl` moved to `arena/ip/` with `Ps2Interface.vhd`). §12: M3 `ip/` item done. No Tier-1 interface changes. |
