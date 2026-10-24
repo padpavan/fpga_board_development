@@ -1,33 +1,38 @@
 `timescale 1ns / 1ps
+`include "arena_defs.vh"
 //////////////////////////////////////////////////////////////////////////////
 // Member 1 - BFS engine (unweighted baseline shortest path)
 //
 //   - FIFO frontier queue implemented as a ring buffer in a grid_mem.
 //   - visited bitmap + parent/predecessor memory for path reconstruction.
+//   - 2-bit cell_state RAM with an independent async read port for VGA.
 //   - Reports busy/done/found/no_path, path readback, and stats
 //     (cycles, expansions, path cost / path cell count).
 //
-// Usage:
-//   1. While the engine is idle, load the maze into its local cost RAM using
-//      load_we / load_addr / load_data (4-bit cost, 0 = wall, 1..15 = cost).
-//   2. Pulse `start` once with start_idx / goal_idx held.
+// Port list and handshake follow CONTRACT.md section 4:
+//   1. While not busy, load the maze into the local cost RAM using
+//      load_we / load_addr / load_data (4-bit cost, 0 = wall).
+//   2. Pulse `start` (accepted when idle or done) with start_idx / goal_idx.
 //   3. Wait for `done`; read `found` / `no_path`, then read the path back
 //      through path_rd_addr -> path_rd_data (path_cells entries).
+//   step_en = 0 freezes the search (FSM, counters, current, cell_state).
 //
-// BFS ignores cost magnitudes and treats every non-zero cost cell as
+// BFS ignores cost magnitudes and treats every non-wall cell as
 // traversable with a single step, giving minimum-step routes.
 //////////////////////////////////////////////////////////////////////////////
 module bfs_engine #(
-    parameter COLS    = 16,
-    parameter ROWS    = 12,
-    parameter COST_W  = 4,
-    parameter DIST_W  = 16,
-    parameter INDEX_W = 8
+    parameter COLS    = `ARENA_COLS,
+    parameter ROWS    = `ARENA_ROWS,
+    parameter COST_W  = `ARENA_COST_W,
+    parameter DIST_W  = `ARENA_DIST_W,
+    parameter INDEX_W = `ARENA_INDEX_W,
+    parameter CNT_W   = `ARENA_CNT_W
 ) (
     input  wire                 clk,
     input  wire                 rst,
+    input  wire                 step_en,
 
-    // maze load interface (driven while idle)
+    // maze load interface (only while not busy)
     input  wire                 load_we,
     input  wire [INDEX_W-1:0]   load_addr,
     input  wire [COST_W-1:0]    load_data,
@@ -46,23 +51,29 @@ module bfs_engine #(
     // path readback (valid after done && found)
     input  wire [INDEX_W-1:0]   path_rd_addr,
     output wire [INDEX_W-1:0]   path_rd_data,
-    output reg  [DIST_W-1:0]    path_cells,   // cells in path (goal inclusive)
+    output reg  [DIST_W-1:0]    path_cells,   // cells in path (start and goal inclusive)
     output reg  [DIST_W-1:0]    path_cost,    // number of steps (edges)
 
     // live search view (node currently being expanded / popped)
     output reg  [INDEX_W-1:0]   current,
+    input  wire [INDEX_W-1:0]   cell_rd_addr,
+    output wire [1:0]           cell_state,
 
     // statistics
-    output reg  [DIST_W-1:0]    cycles,
+    output reg  [CNT_W-1:0]     cycles,
     output reg  [DIST_W-1:0]    expansions
 );
     localparam NUM_CELLS = COLS * ROWS;
-    localparam [INDEX_W-1:0] NONE = {INDEX_W{1'b1}};
+    localparam [INDEX_W-1:0] NONE     = {INDEX_W{1'b1}};
+    localparam [CNT_W-1:0]   CNT_MAX  = {CNT_W{1'b1}};
+    localparam [DIST_W-1:0]  DIST_MAX = {DIST_W{1'b1}};
 
     localparam [INDEX_W-1:0] COLS_W = COLS;
     localparam [INDEX_W-1:0] ROWS_W = ROWS;
 
-    // FSM states
+    // FSM states.  Every finish goes through S_FINISH, which lets the last
+    // registered memory write land before done rises, then returns to S_IDLE
+    // with done = 1.
     localparam [2:0] S_IDLE        = 3'd0,
                      S_CLEAR       = 3'd1,
                      S_START_ENQ   = 3'd2,
@@ -70,7 +81,7 @@ module bfs_engine #(
                      S_EXPAND      = 3'd4,
                      S_RECON_COUNT = 3'd5,
                      S_RECON_STORE = 3'd6,
-                     S_DONE        = 3'd7;
+                     S_FINISH      = 3'd7;
 
     reg [2:0]        state;
     reg [INDEX_W-1:0] clr_addr, head, tail;
@@ -79,18 +90,23 @@ module bfs_engine #(
     reg [DIST_W-1:0]  recon_len;
     reg [1:0]         dir;
     reg [INDEX_W:0]   count;
-    reg               start_d;
+    reg               ep_wall;     // start or goal seen as a wall during S_CLEAR
 
     // memory write ports
     reg               vis_we;      reg [INDEX_W-1:0] vis_waddr;  reg              vis_wdata;
     reg               par_we;      reg [INDEX_W-1:0] par_waddr;  reg [INDEX_W-1:0] par_wdata;
     reg               q_we;        reg [INDEX_W-1:0] q_waddr;    reg [INDEX_W-1:0] q_wdata;
     reg               path_we;     reg [INDEX_W-1:0] path_waddr; reg [INDEX_W-1:0] path_wdata;
+    reg               cs_we;       reg [INDEX_W-1:0] cs_waddr;   reg [1:0]         cs_wdata;
 
     // memory read data
     wire              vis_rdata;
     wire [COST_W-1:0] cost_rdata;
-    wire [INDEX_W-1:0] q_rdata, par_rdata, path_rdata;
+    wire [INDEX_W-1:0] q_rdata, par_rdata;
+
+    // write ports are registered, so a slot enqueued on the previous step is
+    // still pending when S_POP reads it: forward it
+    wire [INDEX_W-1:0] q_head = (q_we && q_waddr == head) ? q_wdata : q_rdata;
 
     // -------- combinational neighbour generation (from `current`) ----------
     wire [INDEX_W-1:0] cur_row = current / COLS;
@@ -108,30 +124,41 @@ module bfs_engine #(
         (dir == 2'd2) ? (cur_col > 0)          :
                         (cur_col < (COLS - 1));
 
+    // -------- start / goal validity check (during S_CLEAR) -----------------
+    wire [INDEX_W-1:0] cost_raddr = (state == S_CLEAR) ? clr_addr : nb_sel;
+    wire ep_hit = ((clr_addr == s_idx) || (clr_addr == g_idx)) &&
+                  (cost_rdata == `ARENA_COST_WALL);
+    wire ep_out = (s_idx >= NUM_CELLS) || (g_idx >= NUM_CELLS);
+
     // -------- memories -----------------------------------------------------
     grid_mem #(.ADDR_W(INDEX_W), .DATA_W(COST_W)) u_cost (
         .clk(clk), .we(load_we), .waddr(load_addr), .wdata(load_data),
-        .raddr(nb_sel), .rdata(cost_rdata)
+        .raddr(cost_raddr), .rdata(cost_rdata)
     );
 
     grid_mem #(.ADDR_W(INDEX_W), .DATA_W(1)) u_visited (
-        .clk(clk), .we(vis_we), .waddr(vis_waddr), .wdata(vis_wdata),
+        .clk(clk), .we(vis_we && step_en), .waddr(vis_waddr), .wdata(vis_wdata),
         .raddr(nb_sel), .rdata(vis_rdata)
     );
 
     grid_mem #(.ADDR_W(INDEX_W), .DATA_W(INDEX_W)) u_parent (
-        .clk(clk), .we(par_we), .waddr(par_waddr), .wdata(par_wdata),
+        .clk(clk), .we(par_we && step_en), .waddr(par_waddr), .wdata(par_wdata),
         .raddr(recon_cur), .rdata(par_rdata)
     );
 
     grid_mem #(.ADDR_W(INDEX_W), .DATA_W(INDEX_W)) u_queue (
-        .clk(clk), .we(q_we), .waddr(q_waddr), .wdata(q_wdata),
+        .clk(clk), .we(q_we && step_en), .waddr(q_waddr), .wdata(q_wdata),
         .raddr(head), .rdata(q_rdata)
     );
 
     grid_mem #(.ADDR_W(INDEX_W), .DATA_W(INDEX_W)) u_path (
-        .clk(clk), .we(path_we), .waddr(path_waddr), .wdata(path_wdata),
+        .clk(clk), .we(path_we && step_en), .waddr(path_waddr), .wdata(path_wdata),
         .raddr(path_rd_addr), .rdata(path_rd_data)
+    );
+
+    grid_mem #(.ADDR_W(INDEX_W), .DATA_W(`ARENA_CS_W)) u_cell_state (
+        .clk(clk), .we(cs_we && step_en), .waddr(cs_waddr), .wdata(cs_wdata),
+        .raddr(cell_rd_addr), .rdata(cell_state)
     );
 
     // -------- FSM + registers ----------------------------------------------
@@ -147,139 +174,176 @@ module bfs_engine #(
             path_cost   <= 0;
             cycles      <= 0;
             expansions  <= 0;
-            start_d     <= 1'b0;
+            vis_we      <= 1'b0;
+            par_we      <= 1'b0;
+            q_we        <= 1'b0;
+            path_we     <= 1'b0;
+            cs_we       <= 1'b0;
         end else begin
-            start_d <= start;
+            // defaults: no memory writes next step.  A write issued on the
+            // last step before a pause is held (and gated by step_en at the
+            // memory) until the engine resumes.
+            if (step_en) begin
+                vis_we  <= 1'b0;
+                par_we  <= 1'b0;
+                q_we    <= 1'b0;
+                path_we <= 1'b0;
+                cs_we   <= 1'b0;
+            end
 
-            // defaults: no memory writes this cycle
-            vis_we  <= 1'b0;
-            par_we  <= 1'b0;
-            q_we    <= 1'b0;
-            path_we <= 1'b0;
+            // cycles: every step_en cycle after start, up to and including
+            // the cycle done rises (busy is still 1 on that edge)
+            if (busy && step_en && cycles != CNT_MAX)
+                cycles <= cycles + 1'b1;
 
-            case (state)
-                S_IDLE: begin
-                    done    <= 1'b0;
-                    found   <= 1'b0;
-                    no_path <= 1'b0;
-                    if (start && !start_d) begin
-                        s_idx      <= start_idx;
-                        g_idx      <= goal_idx;
-                        busy       <= 1'b1;
-                        head       <= 0;
-                        tail       <= 0;
-                        count      <= 0;
-                        clr_addr   <= 0;
-                        cycles     <= 0;
-                        expansions <= 0;
-                        path_cells <= 0;
-                        path_cost  <= 0;
-                        state      <= S_CLEAR;
-                    end
+            if (state == S_IDLE) begin
+                if (start) begin
+                    s_idx      <= start_idx;
+                    g_idx      <= goal_idx;
+                    busy       <= 1'b1;
+                    done       <= 1'b0;
+                    found      <= 1'b0;
+                    no_path    <= 1'b0;
+                    head       <= 0;
+                    tail       <= 0;
+                    count      <= 0;
+                    clr_addr   <= 0;
+                    ep_wall    <= 1'b0;
+                    cycles     <= 0;
+                    expansions <= 0;
+                    path_cells <= 0;
+                    path_cost  <= 0;
+                    state      <= S_CLEAR;
                 end
-
-                S_CLEAR: begin
-                    vis_we    <= 1'b1;
-                    vis_waddr <= clr_addr;
-                    vis_wdata <= 1'b0;
-                    par_we    <= 1'b1;
-                    par_waddr <= clr_addr;
-                    par_wdata <= NONE;
-                    if (clr_addr == NUM_CELLS - 1)
-                        state <= S_START_ENQ;
-                    else
-                        clr_addr <= clr_addr + 1'b1;
-                end
-
-                S_START_ENQ: begin
-                    vis_we    <= 1'b1;
-                    vis_waddr <= s_idx;
-                    vis_wdata <= 1'b1;
-                    par_we    <= 1'b1;
-                    par_waddr <= s_idx;
-                    par_wdata <= NONE;
-                    q_we      <= 1'b1;
-                    q_waddr   <= tail;
-                    q_wdata   <= s_idx;
-                    tail      <= tail + 1'b1;
-                    count     <= 1;
-                    state     <= S_POP;
-                end
-
-                S_POP: begin
-                    if (count == 0) begin
-                        no_path <= 1'b1;
-                        state   <= S_DONE;
-                    end else begin
-                        current    <= q_rdata;
-                        head       <= head + 1'b1;
-                        count      <= count - 1'b1;
-                        expansions <= expansions + 1'b1;
-                        if (q_rdata == g_idx) begin
-                            found     <= 1'b1;
-                            recon_cur <= g_idx;
-                            recon_len <= 0;
-                            state     <= S_RECON_COUNT;
+            end else if (step_en) begin
+                case (state)
+                    S_CLEAR: begin
+                        vis_we    <= 1'b1;
+                        vis_waddr <= clr_addr;
+                        vis_wdata <= 1'b0;
+                        par_we    <= 1'b1;
+                        par_waddr <= clr_addr;
+                        par_wdata <= NONE;
+                        cs_we     <= 1'b1;
+                        cs_waddr  <= clr_addr;
+                        cs_wdata  <= `ARENA_CS_UNSEEN;
+                        if (ep_hit)
+                            ep_wall <= 1'b1;
+                        if (clr_addr == NUM_CELLS - 1) begin
+                            if (ep_wall || ep_hit || ep_out) begin
+                                no_path <= 1'b1;
+                                state   <= S_FINISH;
+                            end else begin
+                                state   <= S_START_ENQ;
+                            end
                         end else begin
-                            dir   <= 0;
-                            state <= S_EXPAND;
+                            clr_addr <= clr_addr + 1'b1;
                         end
                     end
-                end
 
-                S_EXPAND: begin
-                    if (nb_ok && !vis_rdata && (cost_rdata != 0)) begin
+                    S_START_ENQ: begin
                         vis_we    <= 1'b1;
-                        vis_waddr <= nb_sel;
+                        vis_waddr <= s_idx;
                         vis_wdata <= 1'b1;
                         par_we    <= 1'b1;
-                        par_waddr <= nb_sel;
-                        par_wdata <= current;
+                        par_waddr <= s_idx;
+                        par_wdata <= NONE;
                         q_we      <= 1'b1;
                         q_waddr   <= tail;
-                        q_wdata   <= nb_sel;
+                        q_wdata   <= s_idx;
+                        cs_we     <= 1'b1;
+                        cs_waddr  <= s_idx;
+                        cs_wdata  <= `ARENA_CS_FRONTIER;
                         tail      <= tail + 1'b1;
-                        count     <= count + 1'b1;
+                        count     <= 1;
+                        state     <= S_POP;
                     end
-                    if (dir == 2'd3)
-                        state <= S_POP;
-                    else
-                        dir <= dir + 1'b1;
-                end
 
-                S_RECON_COUNT: begin
-                    if (recon_cur != s_idx) begin
-                        recon_len <= recon_len + 1'b1;
-                        recon_cur <= par_rdata;
-                    end else begin
-                        recon_cur <= g_idx;
-                        recon_idx <= recon_len;
-                        state     <= S_RECON_STORE;
+                    S_POP: begin
+                        if (count == 0) begin
+                            no_path <= 1'b1;
+                            state   <= S_FINISH;
+                        end else begin
+                            current  <= q_head;
+                            head     <= head + 1'b1;
+                            count    <= count - 1'b1;
+                            cs_we    <= 1'b1;
+                            cs_waddr <= q_head;
+                            cs_wdata <= `ARENA_CS_VISITED;
+                            if (expansions != DIST_MAX)
+                                expansions <= expansions + 1'b1;
+                            if (q_head == g_idx) begin
+                                found     <= 1'b1;
+                                recon_cur <= g_idx;
+                                recon_len <= 0;
+                                state     <= S_RECON_COUNT;
+                            end else begin
+                                dir   <= 0;
+                                state <= S_EXPAND;
+                            end
+                        end
                     end
-                end
 
-                S_RECON_STORE: begin
-                    path_we    <= 1'b1;
-                    path_waddr <= recon_idx;
-                    path_wdata <= recon_cur;
-                    if (recon_cur == s_idx) begin
-                        path_cells <= recon_len + 1'b1;
-                        path_cost  <= recon_len;
-                        state      <= S_DONE;
-                    end else begin
-                        recon_idx <= recon_idx - 1'b1;
-                        recon_cur <= par_rdata;
+                    S_EXPAND: begin
+                        if (nb_ok && !vis_rdata && (cost_rdata != `ARENA_COST_WALL)) begin
+                            vis_we    <= 1'b1;
+                            vis_waddr <= nb_sel;
+                            vis_wdata <= 1'b1;
+                            par_we    <= 1'b1;
+                            par_waddr <= nb_sel;
+                            par_wdata <= current;
+                            q_we      <= 1'b1;
+                            q_waddr   <= tail;
+                            q_wdata   <= nb_sel;
+                            cs_we     <= 1'b1;
+                            cs_waddr  <= nb_sel;
+                            cs_wdata  <= `ARENA_CS_FRONTIER;
+                            tail      <= tail + 1'b1;
+                            count     <= count + 1'b1;
+                        end
+                        if (dir == 2'd3)
+                            state <= S_POP;
+                        else
+                            dir <= dir + 1'b1;
                     end
-                end
 
-                S_DONE: begin
-                    busy <= 1'b0;
-                    done <= 1'b1;
-                end
-            endcase
+                    S_RECON_COUNT: begin
+                        if (recon_cur != s_idx) begin
+                            recon_len <= recon_len + 1'b1;
+                            recon_cur <= par_rdata;
+                        end else begin
+                            recon_cur <= g_idx;
+                            recon_idx <= recon_len;
+                            state     <= S_RECON_STORE;
+                        end
+                    end
 
-            if (state != S_IDLE && state != S_DONE)
-                cycles <= cycles + 1'b1;
+                    S_RECON_STORE: begin
+                        path_we    <= 1'b1;
+                        path_waddr <= recon_idx;
+                        path_wdata <= recon_cur;
+                        cs_we      <= 1'b1;
+                        cs_waddr   <= recon_cur;
+                        cs_wdata   <= `ARENA_CS_PATH;
+                        if (recon_cur == s_idx) begin
+                            path_cells <= recon_len + 1'b1;
+                            path_cost  <= recon_len;
+                            state      <= S_FINISH;
+                        end else begin
+                            recon_idx <= recon_idx - 1'b1;
+                            recon_cur <= par_rdata;
+                        end
+                    end
+
+                    S_FINISH: begin
+                        busy  <= 1'b0;
+                        done  <= 1'b1;
+                        state <= S_IDLE;
+                    end
+
+                    default: state <= S_IDLE;
+                endcase
+            end
         end
     end
 endmodule
