@@ -10,14 +10,12 @@
 //     * dij.path_cost == ast.path_cost == reference dij_cost   (hard rule)
 //     * ast.expansions <= dij.expansions                        (reported only)
 //
-// M1's dijkstra_engine predates CONTRACT 1.0 (see CONTRACT 12):
-//   * no step_en / cell_rd_addr ports, 16-bit cycles, needs rst to rerun,
-//     start==goal and wall endpoints not yet handled.
-// By default this bench drives that CURRENT port list, pulses rst before
-// each run, and SKIPS the CONTRACT-12 edge cases (counted and reported).
-// Once M1's engine meets CONTRACT 4, compile with  -DDIJ_CONTRACT_PORTS
-// to use the frozen port list and check every run with no skips:
-//     sim/run_m2.sh tb_m2_crosscheck rtl/m1_pathfind/dijkstra_engine.v -DDIJ_CONTRACT_PORTS
+// M1's dijkstra_engine meets CONTRACT 4 (PR #2), so by default this bench
+// uses the frozen port list and checks every run with no skips:
+//     sim/run_m2.sh tb_m2_crosscheck rtl/m1_pathfind/dijkstra_engine.v
+// -DDIJ_LEGACY_PORTS selects the pre-contract port list (no step_en /
+// cell_rd_addr, 16-bit cycles, rst before each run, CONTRACT-12 edge cases
+// skipped), for checking against an old M1 checkout.
 // Ends with "PASS: ..." or "FAIL: ..." (CONTRACT 10).
 //////////////////////////////////////////////////////////////////////////////
 module tb_m2_crosscheck;
@@ -64,7 +62,7 @@ module tb_m2_crosscheck;
     wire [INDEX_W-1:0] dij_path_rd_data, dij_current;
     wire [DIST_W-1:0]  dij_path_cells, dij_path_cost, dij_expansions;
 
-`ifdef DIJ_CONTRACT_PORTS
+`ifndef DIJ_LEGACY_PORTS
     wire [CNT_W-1:0]   dij_cycles;
     wire [1:0]         dij_cell_state;
 
@@ -188,7 +186,7 @@ module tb_m2_crosscheck;
         repeat (3) @(posedge clk);
         @(negedge clk) rst = 1'b0;
         if (LEGACY_DIJ)
-            $display("Dijkstra: pre-contract port list (compile with -DDIJ_CONTRACT_PORTS once M1 meets CONTRACT 4)");
+            $display("Dijkstra: pre-contract port list (-DDIJ_LEGACY_PORTS)");
 
         run_file("sim/mazes/open.mem",        "sim/mazes/open.expect");
         run_file("sim/mazes/weighted.mem",    "sim/mazes/weighted.expect");
