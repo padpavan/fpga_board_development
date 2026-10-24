@@ -87,7 +87,10 @@ module pathfind_top #(
     output wire [INDEX_W-1:0]   ast_current,
     output wire [1:0]           ast_cell_state,
     output wire [CNT_W-1:0]     ast_cycles,
-    output wire [DIST_W-1:0]    ast_expansions
+    output wire [DIST_W-1:0]    ast_expansions,
+
+    // A* debug (CONTRACT 0: optional dbg_ output, may be left unconnected)
+    output wire [3:0]           ast_dbg_state
 );
     bfs_engine #(
         .COLS(COLS), .ROWS(ROWS), .COST_W(COST_W),
@@ -131,6 +134,7 @@ module pathfind_top #(
         .path_cells(ast_path_cells), .path_cost(ast_path_cost),
         .current(ast_current),
         .cell_rd_addr(cell_rd_addr), .cell_state(ast_cell_state),
-        .cycles(ast_cycles), .expansions(ast_expansions)
+        .cycles(ast_cycles), .expansions(ast_expansions),
+        .dbg_state(ast_dbg_state)
     );
 endmodule

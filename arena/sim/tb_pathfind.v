@@ -9,8 +9,10 @@
 //                           minimum weighted cost (17), demonstrating
 //                           "fewest steps != least cost".
 //   Scenario C (corridor) : unit cost, unique path -> both 100.
-// A* is still M2's stub: it is only required to reach `done`.  Once the real
-// engine lands, add the dij.path_cost == ast.path_cost cross-check here.
+//   Every scenario also checks A*: ast.path_cost == dij.path_cost (10.3).
+//   Shared mazes (10.2): every run in sim/mazes/<name>.expect is replayed
+//   through pathfind_top and all three engines are checked against M2's
+//   reference model (found / no_path, bfs/dij/ast cost, BFS path_cells).
 // Scenarios run back-to-back without rst (restart from DONE).
 //////////////////////////////////////////////////////////////////////////////
 module tb_pathfind;
@@ -52,6 +54,7 @@ module tb_pathfind;
     wire [CNT_W-1:0]   ast_cycles;
     wire [INDEX_W-1:0] ast_current;
     wire [1:0]         ast_cell_state;
+    wire [3:0]         ast_dbg_state;
 
     pathfind_top #(
         .COLS(COLS), .ROWS(ROWS), .COST_W(COST_W),
@@ -75,7 +78,8 @@ module tb_pathfind;
         .ast_path_rd_addr(ast_path_rd_addr), .ast_path_rd_data(ast_path_rd_data),
         .ast_path_cells(ast_path_cells), .ast_path_cost(ast_path_cost),
         .ast_current(ast_current), .ast_cell_state(ast_cell_state),
-        .ast_cycles(ast_cycles), .ast_expansions(ast_expansions)
+        .ast_cycles(ast_cycles), .ast_expansions(ast_expansions),
+        .ast_dbg_state(ast_dbg_state)
     );
 
     reg [COST_W-1:0] cost [0:NUM_CELLS-1];
@@ -145,14 +149,17 @@ module tb_pathfind;
         input integer exp_bfs;
         input integer exp_dij;
         begin
-            if (bfs_found && dij_found &&
-                bfs_path_cost == exp_bfs && dij_path_cost == exp_dij) begin
-                $display("PASS %0s: BFS steps=%0d (%0d cyc, %0d exp), Dijkstra cost=%0d (%0d cyc, %0d exp)",
+            if (bfs_found && dij_found && ast_found &&
+                bfs_path_cost == exp_bfs && dij_path_cost == exp_dij &&
+                ast_path_cost == exp_dij) begin
+                $display("PASS %0s: BFS steps=%0d (%0d cyc, %0d exp), Dijkstra cost=%0d (%0d cyc, %0d exp), A* cost=%0d (%0d cyc, %0d exp)",
                          name, bfs_path_cost, bfs_cycles, bfs_expansions,
-                         dij_path_cost, dij_cycles, dij_expansions);
+                         dij_path_cost, dij_cycles, dij_expansions,
+                         ast_path_cost, ast_cycles, ast_expansions);
             end else begin
-                $display("FAIL %0s: bfs(found=%b cost=%0d) dij(found=%b cost=%0d)",
-                         name, bfs_found, bfs_path_cost, dij_found, dij_path_cost);
+                $display("FAIL %0s: bfs(found=%b cost=%0d) dij(found=%b cost=%0d) ast(found=%b cost=%0d)",
+                         name, bfs_found, bfs_path_cost, dij_found, dij_path_cost,
+                         ast_found, ast_path_cost);
                 errors = errors + 1;
             end
         end
@@ -178,6 +185,53 @@ module tb_pathfind;
         end
     endtask
 
+    // replay every run of a shared maze (sim/mazes/README.md format)
+    task run_maze_file;
+        input [8*40-1:0] mem_file;
+        input [8*40-1:0] exp_file;
+        integer fd, r, rs, rg, ef, eb, ed, ea, ec, n, bad;
+        begin
+            $readmemh(mem_file, cost);
+            fd = $fopen(exp_file, "r");
+            if (fd == 0) begin
+                $display("FAIL cannot open %0s", exp_file);
+                errors = errors + 1;
+            end else begin
+                n = 0;
+                r = $fscanf(fd, "%d %d %d %d %d %d %d\n", rs, rg, ef, eb, ed, ea, ec);
+                while (r == 7) begin
+                    run(rs, rg);
+                    bad = 0;
+                    if (ef) begin
+                        if (!(bfs_found && dij_found && ast_found)) bad = bad + 1;
+                        if (bfs_path_cost != eb || bfs_path_cells != ec) bad = bad + 1;
+                        if (dij_path_cost != ed || ast_path_cost != ea) bad = bad + 1;
+                        if (dij_path_cost != ast_path_cost) bad = bad + 1;
+                    end else begin
+                        if (!(bfs_no_path && dij_no_path && ast_no_path)) bad = bad + 1;
+                        if (bfs_found || dij_found || ast_found) bad = bad + 1;
+                    end
+                    if (bad != 0) begin
+                        $display("FAIL %0s %0d->%0d: exp found=%0d bfs=%0d dij=%0d ast=%0d | got bfs(%b,%0d) dij(%b,%0d) ast(%b,%0d)",
+                                 mem_file, rs, rg, ef, eb, ed, ea,
+                                 bfs_found, bfs_path_cost, dij_found, dij_path_cost,
+                                 ast_found, ast_path_cost);
+                        errors = errors + 1;
+                    end
+                    n = n + 1;
+                    r = $fscanf(fd, "%d %d %d %d %d %d %d\n", rs, rg, ef, eb, ed, ea, ec);
+                end
+                $fclose(fd);
+                if (n == 0) begin
+                    $display("FAIL %0s: no runs read", exp_file);
+                    errors = errors + 1;
+                end else begin
+                    $display("DONE %0s: %0d runs", mem_file, n);
+                end
+            end
+        end
+    endtask
+
     initial begin
         $display("=== PATHFIND_TOP SELF-TEST ===");
         errors = 0;
@@ -199,13 +253,28 @@ module tb_pathfind;
         run(0, 160);
         expect_costs("corridor", 100, 100);
 
-        // shared cell_rd_addr reaches both engines' cell_state ports
+        // shared cell_rd_addr reaches all three engines' cell_state ports
         cell_rd_addr = 0; #1;
-        if (bfs_cell_state != `ARENA_CS_PATH || dij_cell_state != `ARENA_CS_PATH) begin
-            $display("FAIL cell_state: bfs=%0d dij=%0d at start cell",
-                     bfs_cell_state, dij_cell_state);
+        if (bfs_cell_state != `ARENA_CS_PATH || dij_cell_state != `ARENA_CS_PATH ||
+            ast_cell_state != `ARENA_CS_PATH) begin
+            $display("FAIL cell_state: bfs=%0d dij=%0d ast=%0d at start cell",
+                     bfs_cell_state, dij_cell_state, ast_cell_state);
             errors = errors + 1;
         end
+
+        // ---- Shared mazes vs the reference model (CONTRACT 10.2/10.3) -----
+        run_maze_file("sim/mazes/open.mem",        "sim/mazes/open.expect");
+        run_maze_file("sim/mazes/weighted.mem",    "sim/mazes/weighted.expect");
+        run_maze_file("sim/mazes/unreachable.mem", "sim/mazes/unreachable.expect");
+        run_maze_file("sim/mazes/corridor.mem",    "sim/mazes/corridor.expect");
+        run_maze_file("sim/mazes/rand0.mem",       "sim/mazes/rand0.expect");
+        run_maze_file("sim/mazes/rand1.mem",       "sim/mazes/rand1.expect");
+        run_maze_file("sim/mazes/rand2.mem",       "sim/mazes/rand2.expect");
+        run_maze_file("sim/mazes/rand3.mem",       "sim/mazes/rand3.expect");
+        run_maze_file("sim/mazes/rand4.mem",       "sim/mazes/rand4.expect");
+        run_maze_file("sim/mazes/rand5.mem",       "sim/mazes/rand5.expect");
+        run_maze_file("sim/mazes/rand6.mem",       "sim/mazes/rand6.expect");
+        run_maze_file("sim/mazes/rand7.mem",       "sim/mazes/rand7.expect");
 
         if (errors == 0)
             $display("TB_PATHFIND PASS");

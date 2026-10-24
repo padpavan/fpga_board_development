@@ -5,7 +5,7 @@ Owner-editable (Tier 2). Record internal decisions other members might want to k
 ## Current state (CONTRACT v1.0)
 - `bfs_engine`: FIFO ring buffer in `grid_mem`, visited bitmap, parent RAM, path reconstruction into a path RAM.
 - `dijkstra_engine`: distance/visited/parent RAMs, minimum-distance selection by **linear scan** over all cells (not a heap yet).
-- `pathfind_top`: instantiates BFS, Dijkstra and A* (`u_astar`, currently M2's stub). Shared inputs are fanned out; every other §4 port has a `bfs_` / `dij_` / `ast_` prefix.
+- `pathfind_top`: instantiates BFS, Dijkstra and M2's real A* (`u_astar`); A*'s `dbg_state` is forwarded as `ast_dbg_state`. Shared inputs are fanned out; every other §4 port has a `bfs_` / `dij_` / `ast_` prefix.
 - Each engine keeps a **private copy** of the maze (its own `grid_mem` cost RAM loaded over the load bus), so there's no memory arbitration between engines.
 - Memories are LUTRAM (`common/grid_mem`, async read).
 
@@ -17,7 +17,7 @@ Owner-editable (Tier 2). Record internal decisions other members might want to k
 - [x] `start == goal`, start/goal on a wall (and out-of-range index) per §4.4.
 - [x] `` `include "arena_defs.vh" ``; parameters default to the macros.
 - [x] `pathfind_top` has `step_en`, `cell_rd_addr` and the `ast_*` group; testbenches updated.
-- [ ] Run the shared mazes in `arena/sim/mazes/` once M2's reference model has generated them.
+- [x] Run the shared mazes in `arena/sim/mazes/`: `tb_pathfind` replays every `.expect` run (58 runs) on all three engines against M2's reference model.
 
 ## Timing per run (both engines, step_en = 1)
 - Clear/init: 192 cycles (one cell per cycle). Start/goal wall check happens here, so a wall endpoint finishes with `no_path` at the end of the clear.
