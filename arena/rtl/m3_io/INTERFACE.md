@@ -3,8 +3,8 @@
 Owner-editable (Tier 2). Binding rules live in `/CONTRACT.md`.
 
 ## Current state
-- Nothing in `arena/` yet. Earlier lab work (debounce, 7-seg, OLED bring-up) is in GPT5/GPT7. The debouncer is now shared as `common/debounce_btn.v`.
-- The mouse controller in `GPT5.srcs/sources_1/new/Mouse_Control.vhd` (entity `MouseCtl`) needs Digilent's `Ps2Interface.vhd`. Put both files in `arena/ip/`.
+- Nothing in `arena/` yet. Earlier lab work (debounce, 7-seg) is in GPT7. The debouncer is now shared as `common/debounce_btn.v`.
+- The Digilent mouse controller is in `arena/ip/`: `MouseCtl.vhd` (entity `MouseCtl`) and its dependency `Ps2Interface.vhd`. Both compile in xsim and synthesise for xc7a35tcpg236-1. Instantiate `MouseCtl` from `arena_top` (VHDL is allowed for `ip/`, §2).
 
 ## Defaults from CONTRACT (change freely, but update this file)
 - Controls: CONTRACT §9 "Controls".
