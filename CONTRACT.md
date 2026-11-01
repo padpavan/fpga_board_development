@@ -1,6 +1,6 @@
 # CONTRACT.md: FPGA Pathfinding Arena (Group S1_18)
 
-**Version 1.3** · Basys 3 (xc7a35tcpg236-1) · Verilog-2001
+**Version 1.4** · Basys 3 (xc7a35tcpg236-1) · Verilog-2001
 
 This file is the integration contract for the three members' work. Read it fully **before** writing any project code, whether you're a human or an AI agent. It defines only what crosses a member boundary. Everything inside a member's own block is that member's choice.
 
@@ -47,6 +47,8 @@ This file is the integration contract for the three members' work. Read it fully
 ```
 CONTRACT.md                 <- this file (all)
 CLAUDE.md                   <- agent pointer to this file (all)
+pathfinder.xpr              <- shared Vivado project; references arena/ files in place (all)
+docs/                       <- proposal and course manual
 arena/                      <- THE integrated project
   rtl/common/               <- shared, all-3 approval to change
     arena_defs.vh             constants (this contract in code form)
@@ -314,3 +316,4 @@ The code already in the repo predates this contract. These changes bring it into
 | 1.1 | 2026-10-24 | §1: GPT5 lab removed (its `Oled_Display.v` was a duplicate of `common/`; its `MouseCtl` moved to `arena/ip/` with `Ps2Interface.vhd`). §12: M3 `ip/` item done. No Tier-1 interface changes. |
 | 1.2 | 2026-11-01 | §1: `AGENTS.md` removed (it duplicated `CLAUDE.md`); `CLAUDE.md` is the only agent pointer. Proposal PDF moved to `docs/`. No Tier-1 interface changes. |
 | 1.3 | 2026-11-01 | §1: standalone GPT7 course lab (`GPT7.xpr`, `GPT7.srcs/`) removed from the repo; it was never part of the arena build and stays in git history. No Tier-1 interface changes. |
+| 1.4 | 2026-11-01 | §1: shared Vivado project `pathfinder.xpr` added at the repo root (sources referenced from `arena/`, not copied); `docs/` listed. No Tier-1 interface changes. |
