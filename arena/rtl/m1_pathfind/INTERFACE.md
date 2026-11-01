@@ -4,7 +4,8 @@ Owner-editable (Tier 2). Record internal decisions other members might want to k
 
 ## Current state (CONTRACT v1.0)
 - `bfs_engine`: FIFO ring buffer in `grid_mem`, visited bitmap, parent RAM, path reconstruction into a path RAM.
-- `dijkstra_engine`: distance/visited/parent RAMs, minimum-distance selection by **linear scan** over all cells (not a heap yet).
+- `dijkstra_engine`: distance/visited/parent RAMs, minimum-distance selection by an **indexed binary min-heap** (`dij_min_heap`).
+- `dij_min_heap`: heap array in LUTRAM (two copies so sift-down reads both children at once) + `pos[cell]` table for decrease-key. Each cell is queued at most once, so it never exceeds 192 entries and never pops a stale entry. Commands: `clr`, `push` (insert, or decrease-key with `push_upd = 1`), `pop`; `min_idx`/`min_key` valid when `ready && !empty`. Push = 1 + ≤ 8 cycles (sift-up, 1/level); pop = 1 + ≤ 16 cycles (sift-down, 2/level). Tested by `tb_dij_min_heap`.
 - `pathfind_top`: instantiates BFS, Dijkstra and M2's real A* (`u_astar`); A*'s `dbg_state` is forwarded as `ast_dbg_state`. Shared inputs are fanned out; every other §4 port has a `bfs_` / `dij_` / `ast_` prefix.
 - Each engine keeps a **private copy** of the maze (its own `grid_mem` cost RAM loaded over the load bus), so there's no memory arbitration between engines.
 - Memories are LUTRAM (`common/grid_mem`, async read).
@@ -22,11 +23,14 @@ Owner-editable (Tier 2). Record internal decisions other members might want to k
 ## Timing per run (both engines, step_en = 1)
 - Clear/init: 192 cycles (one cell per cycle). Start/goal wall check happens here, so a wall endpoint finishes with `no_path` at the end of the clear.
 - BFS: 1 cycle per pop + 4 cycles per expansion (one per neighbour) + reconstruction (2 × path_cells cycles).
-- Dijkstra: 193 cycles per selection scan + 8 relax cycles per settled node (read + write per neighbour) + reconstruction. About 39k cycles on the open 16×12 grid.
+- Dijkstra: 1 seed cycle + per settled node: 1 pop + 8 relax cycles (read + write per neighbour), stalling only if the heap is still sifting when a relax needs to push or when the next pop is due. About 12 cycles per settled node on the open grid.
 - Both: +1 finish cycle (`S_FINISH`) before `done` rises.
-- Measured in xsim (open grid, corner to corner): BFS 1204 cycles, Dijkstra 38 831 cycles.
+- Measured in xsim (open grid, corner to corner): BFS 1204 cycles, Dijkstra 2282 cycles (38 831 with the old linear scan).
+- Post-synthesis (`pathfind_top`, out of context, 100 MHz): worst slack into `u_dijkstra` +0.65 ns, into `u_bfs` +0.40 ns. Dijkstra + heap ≈ 860 LUTs (400 as LUTRAM).
 
 ## Decisions log
+- 2026-11-01: Dijkstra's linear scan replaced by `dij_min_heap` (indexed binary heap with decrease-key). The engine treats a relax on an unsettled cell with a finite distance as decrease-key, anything else as insert, so `pos[]` never needs clearing. Heap memory writes are combinational (land on the same edge as the FSM step), so a sift never reads a pending write. The sift-up parent position is precomputed in a register to keep the read → compare → write path short (slack 0.16 → 0.65 ns). Paths, costs and expansions semantics unchanged; `u_dist_scan` / `u_visited_scan` removed.
+- 2026-11-01: Dijkstra is now faster than A\* in cycles on most mazes (A\* still uses M2's linear-scan open set) while A\* still expands fewer cells. Compare `expansions` for algorithm efficiency; `cycles` reflects both algorithm and queue hardware.
 - 2026-10-23: The FSM has no separate DONE state. Finishing sets `busy=0`, `done=1` in the same cycle and returns to IDLE, which accepts the next `start`. `done/found/no_path` and the stats hold until then.
 - 2026-10-24: Memory write ports are registered, so a write lands one step after the FSM issues it. Every finish now passes through a 1-cycle `S_FINISH` state, so the path RAM and `cell_state` are final when `done` rises. Without it, `path[0]` and the start cell's PATH state were stale.
 - 2026-10-24: Memory write enables are qualified with `step_en`, and the "no write" defaults only apply on a step. A write issued just before a pause lands when the engine resumes, so `cell_state` never changes while `step_en = 0`.

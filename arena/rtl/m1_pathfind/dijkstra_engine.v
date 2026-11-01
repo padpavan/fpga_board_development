@@ -4,7 +4,8 @@
 // Member 1 - Dijkstra engine (weighted shortest path)
 //
 //   - distance RAM, visited set and parent/predecessor memory.
-//   - minimum unsettled-distance selection by linear scan over all cells.
+//   - minimum unsettled-distance selection by an indexed binary min-heap
+//     (dij_min_heap): pop the minimum, push / decrease-key on each relax.
 //   - non-negative cost relaxation:  d[v] <- min(d[v], d[u] + cost[v]).
 //   - predecessor-based path reconstruction.
 //   - 2-bit cell_state RAM with an independent async read port for VGA.
@@ -68,20 +69,21 @@ module dijkstra_engine #(
     // FSM states.  Every finish goes through S_FINISH, which lets the last
     // registered memory write land before done rises, then returns to S_IDLE
     // with done = 1.
-    localparam [2:0] S_IDLE        = 3'd0,
-                     S_INIT        = 3'd1,
-                     S_SELECT      = 3'd2,
-                     S_RELAX       = 3'd3,
-                     S_RECON_COUNT = 3'd4,
-                     S_RECON_STORE = 3'd5,
-                     S_FINISH      = 3'd6,
-                     S_RELAX_WR    = 3'd7;
+    localparam [3:0] S_IDLE        = 4'd0,
+                     S_INIT        = 4'd1,
+                     S_SELECT      = 4'd2,
+                     S_RELAX       = 4'd3,
+                     S_RECON_COUNT = 4'd4,
+                     S_RECON_STORE = 4'd5,
+                     S_FINISH      = 4'd6,
+                     S_RELAX_WR    = 4'd7,
+                     S_SEED        = 4'd8;
 
-    reg [2:0]         state;
-    reg [INDEX_W-1:0] clr_addr, scan_addr, best_idx, sel;
+    reg [3:0]         state;
+    reg [INDEX_W-1:0] clr_addr, sel;
     reg [INDEX_W-1:0] s_idx, g_idx;
     reg [INDEX_W-1:0] recon_cur, recon_idx;
-    reg [DIST_W-1:0]  best_dist, sel_dist, recon_len;
+    reg [DIST_W-1:0]  sel_dist, recon_len;
     reg [1:0]         dir;
     reg               ep_wall;     // start or goal seen as a wall during S_INIT
 
@@ -99,9 +101,9 @@ module dijkstra_engine #(
     reg               cs_we;      reg [INDEX_W-1:0] cs_waddr;   reg [1:0]         cs_wdata;
 
     // memory read data
-    wire               vis_rdata, vis_scan;
+    wire               vis_rdata;
     wire [COST_W-1:0]  cost_rdata;
-    wire [DIST_W-1:0]  dist_rdata, dist_scan;
+    wire [DIST_W-1:0]  dist_rdata;
     wire [INDEX_W-1:0] par_rdata;
 
     // -------- combinational neighbour generation (from `sel`) --------------
@@ -144,21 +146,9 @@ module dijkstra_engine #(
         .raddr(nb_sel), .rdata(dist_rdata)
     );
 
-    // second read port for the S_SELECT scan (same writes), so the scan path
-    // doesn't go through the neighbour-address logic
-    grid_mem #(.ADDR_W(INDEX_W), .DATA_W(DIST_W)) u_dist_scan (
-        .clk(clk), .we(dist_we && step_en), .waddr(dist_waddr), .wdata(dist_wdata),
-        .raddr(scan_addr), .rdata(dist_scan)
-    );
-
     grid_mem #(.ADDR_W(INDEX_W), .DATA_W(1)) u_visited (
         .clk(clk), .we(vis_we && step_en), .waddr(vis_waddr), .wdata(vis_wdata),
         .raddr(nb_sel), .rdata(vis_rdata)
-    );
-
-    grid_mem #(.ADDR_W(INDEX_W), .DATA_W(1)) u_visited_scan (
-        .clk(clk), .we(vis_we && step_en), .waddr(vis_waddr), .wdata(vis_wdata),
-        .raddr(scan_addr), .rdata(vis_scan)
     );
 
     grid_mem #(.ADDR_W(INDEX_W), .DATA_W(INDEX_W)) u_parent (
@@ -174,6 +164,34 @@ module dijkstra_engine #(
     grid_mem #(.ADDR_W(INDEX_W), .DATA_W(`ARENA_CS_W)) u_cell_state (
         .clk(clk), .we(cs_we && step_en), .waddr(cs_waddr), .wdata(cs_wdata),
         .raddr(cell_rd_addr), .rdata(cell_state)
+    );
+
+    // -------- priority queue -----------------------------------------------
+    // Commands are combinational so the heap sees them on the same step.  A
+    // cell with a finite distance that isn't settled is already queued, so an
+    // improving relax on it is a decrease-key rather than an insert.
+    wire               heap_ready, heap_empty;
+    wire [INDEX_W-1:0] heap_min_idx;
+    wire [DIST_W-1:0]  heap_min_key;
+
+    wire init_last   = (state == S_INIT) && (clr_addr == NUM_CELLS - 1);
+    wire rx_improve  = rx_ok && (rx_new < rx_old);
+    wire heap_clr    = init_last;
+    wire heap_push   = (state == S_SEED) ||
+                       ((state == S_RELAX_WR) && rx_improve && heap_ready);
+    wire heap_upd    = (state == S_RELAX_WR) && (rx_old != INF);
+    wire [INDEX_W-1:0] heap_push_idx = (state == S_SEED) ? s_idx : rx_idx;
+    wire [DIST_W-1:0]  heap_push_key = (state == S_SEED) ? {DIST_W{1'b0}} : rx_new;
+    wire heap_pop    = (state == S_SELECT) && heap_ready && !heap_empty;
+
+    dij_min_heap #(.NUM_CELLS(NUM_CELLS), .INDEX_W(INDEX_W), .DIST_W(DIST_W)) u_heap (
+        .clk(clk), .rst(rst), .step_en(step_en),
+        .clr(heap_clr),
+        .push(heap_push), .push_upd(heap_upd),
+        .push_idx(heap_push_idx), .push_key(heap_push_key),
+        .pop(heap_pop),
+        .ready(heap_ready), .empty(heap_empty),
+        .min_idx(heap_min_idx), .min_key(heap_min_key)
     );
 
     assign current = sel;
@@ -222,8 +240,6 @@ module dijkstra_engine #(
                     found      <= 1'b0;
                     no_path    <= 1'b0;
                     clr_addr   <= 0;
-                    scan_addr  <= 0;
-                    best_dist  <= INF;
                     ep_wall    <= 1'b0;
                     cycles     <= 0;
                     expansions <= 0;
@@ -254,41 +270,40 @@ module dijkstra_engine #(
                                 no_path <= 1'b1;
                                 state   <= S_FINISH;
                             end else begin
-                                scan_addr <= 0;
-                                best_dist <= INF;
-                                best_idx  <= 0;
-                                state     <= S_SELECT;
+                                state   <= S_SEED;
                             end
                         end else begin
                             clr_addr <= clr_addr + 1'b1;
                         end
                     end
 
+                    // queue the start cell (the heap was cleared on the last
+                    // S_INIT step, so it is ready)
+                    S_SEED: begin
+                        state <= S_SELECT;
+                    end
+
+                    // pop the closest unsettled cell; wait while the heap is
+                    // still sifting after the previous push / pop
                     S_SELECT: begin
-                        if (scan_addr < NUM_CELLS) begin
-                            if (!vis_scan && (dist_scan < best_dist)) begin
-                                best_dist <= dist_scan;
-                                best_idx  <= scan_addr;
-                                sel_dist  <= dist_scan;
-                            end
-                            scan_addr <= scan_addr + 1'b1;
-                        end else begin
-                            if (best_dist == INF) begin
+                        if (heap_ready) begin
+                            if (heap_empty) begin
                                 no_path <= 1'b1;
                                 state   <= S_FINISH;
                             end else begin
-                                sel       <= best_idx;
+                                sel       <= heap_min_idx;
+                                sel_dist  <= heap_min_key;
                                 vis_we    <= 1'b1;
-                                vis_waddr <= best_idx;
+                                vis_waddr <= heap_min_idx;
                                 vis_wdata <= 1'b1;
                                 cs_we     <= 1'b1;
-                                cs_waddr  <= best_idx;
+                                cs_waddr  <= heap_min_idx;
                                 cs_wdata  <= `ARENA_CS_VISITED;
                                 if (expansions != DIST_MAX)
                                     expansions <= expansions + 1'b1;
-                                if (best_idx == g_idx) begin
+                                if (heap_min_idx == g_idx) begin
                                     found     <= 1'b1;
-                                    path_cost <= sel_dist;
+                                    path_cost <= heap_min_key;
                                     recon_cur <= g_idx;
                                     recon_len <= 0;
                                     state     <= S_RECON_COUNT;
@@ -308,25 +323,27 @@ module dijkstra_engine #(
                         state  <= S_RELAX_WR;
                     end
 
+                    // an improving relax also pushes into the heap, so it waits
+                    // until the heap has finished the previous pop / push
                     S_RELAX_WR: begin
-                        if (rx_ok && (rx_new < rx_old)) begin
-                            dist_we    <= 1'b1;
-                            dist_waddr <= rx_idx;
-                            dist_wdata <= rx_new;
-                            par_we     <= 1'b1;
-                            par_waddr  <= rx_idx;
-                            par_wdata  <= sel;
-                            cs_we      <= 1'b1;
-                            cs_waddr   <= rx_idx;
-                            cs_wdata   <= `ARENA_CS_FRONTIER;
-                        end
-                        if (dir == 2'd3) begin
-                            scan_addr <= 0;
-                            best_dist <= INF;
-                            state     <= S_SELECT;
-                        end else begin
-                            dir   <= dir + 1'b1;
-                            state <= S_RELAX;
+                        if (!rx_improve || heap_ready) begin
+                            if (rx_improve) begin
+                                dist_we    <= 1'b1;
+                                dist_waddr <= rx_idx;
+                                dist_wdata <= rx_new;
+                                par_we     <= 1'b1;
+                                par_waddr  <= rx_idx;
+                                par_wdata  <= sel;
+                                cs_we      <= 1'b1;
+                                cs_waddr   <= rx_idx;
+                                cs_wdata   <= `ARENA_CS_FRONTIER;
+                            end
+                            if (dir == 2'd3) begin
+                                state <= S_SELECT;
+                            end else begin
+                                dir   <= dir + 1'b1;
+                                state <= S_RELAX;
+                            end
                         end
                     end
 
