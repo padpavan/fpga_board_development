@@ -30,9 +30,13 @@ This file is the integration contract for the three members' work. Read it fully
 - Building your own throw-away test top-level and XDC for board testing. Keep it in your folder and name it `<member>_test_top.v`, e.g. `m2_test_top.v`.
 
 ### Changing a Tier-1 item
-1. Open a PR that edits **both** `CONTRACT.md` and `arena/rtl/common/arena_defs.vh` (if constants change).
-2. Bump the minor version (1.0 → 1.1) and add a changelog line (bottom of file).
-3. All three members approve. Whoever proposes the change also updates any existing code that breaks.
+
+1. Any member may propose or directly implement a Tier-1 change.
+2. Changes must be communicated to all affected members before integration. Unanimous approval is not required.
+3. Update `CONTRACT.md` and any affected shared definitions, including `arena/rtl/common/arena_defs.vh` where applicable.
+4. Bump the contract version and record the change in the changelog.
+5. The member making the change is responsible for identifying and resolving compatibility issues with existing modules, coordinating with affected members where necessary.
+6. AI agents may implement Tier-1 changes when explicitly instructed by their user, provided the contract and affected interfaces are updated consistently.
 
 ### Rules for AI agents
 - Read this file and `arena/rtl/common/arena_defs.vh` before generating code.
