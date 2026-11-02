@@ -1,6 +1,9 @@
 `timescale 1ns / 1ps
 `include "arena_defs.vh"
 // EDIT -> LOAD -> START -> RUN/PAUSE -> DONE controller and maze edit bus.
+// run_sel (sw[5:2]) picks the engines; it is latched into run_mask when BTNC
+// starts a run (a run with nothing selected is ignored). DONE = every
+// selected engine is done.
 module sys_ctrl #(
     parameter NUM_CELLS=`ARENA_NUM_CELLS, parameter INDEX_W=`ARENA_INDEX_W,
     parameter COST_W=`ARENA_COST_W, parameter SPEED_W=23
@@ -11,18 +14,22 @@ module sys_ctrl #(
     input wire mouse_left, input wire mouse_right, input wire [INDEX_W-1:0] mouse_idx,
     input wire [1:0] edit_tool,
     input wire gen_busy, input wire gen_done,
-    input wire [2:0] engines_done,
+    input wire [3:0] engines_done,   // {dfs, ast, dij, bfs}
+    input wire [3:0] run_sel,        // {dfs, ast, dij, bfs} switches
     output reg gen_start, output reg gen_random,
     output reg maze_we, output reg [INDEX_W-1:0] maze_addr, output reg [COST_W-1:0] maze_data,
     output reg load_we, output reg [INDEX_W-1:0] load_addr,
     output reg start_pulse, output reg step_en, output reg edit_mode,
     output reg [INDEX_W-1:0] start_idx, output reg [INDEX_W-1:0] goal_idx,
-    output reg [2:0] mode, output reg paused
+    output reg [2:0] mode, output reg paused,
+    output reg [3:0] run_mask        // engines in the current / last run
 );
     localparam [2:0] M_EDIT=3'd0, M_GEN=3'd1, M_LOAD=3'd2, M_START=3'd3,
                      M_RUN=3'd4, M_PAUSE=3'd5, M_DONE=3'd6, M_GEN_REQ=3'd7;
     reg [INDEX_W-1:0] load_ptr;
     reg [SPEED_W-1:0] speed_count;
+    wire run_ok = run_pulse && (run_sel != 4'b0000);
+    wire all_sel_done = &(engines_done | ~run_mask);
     wire [SPEED_W-1:0] speed_limit = (speed_sel == 0) ? 0 : ((1 << (speed_sel + 10))-1);
     always @* begin
         edit_mode = (mode == M_EDIT);
@@ -48,7 +55,7 @@ module sys_ctrl #(
         if (rst) begin
             mode <= M_GEN_REQ; gen_random <= 1'b0; paused <= 1'b0;
             load_ptr <= 0; start_idx <= 0; goal_idx <= NUM_CELLS-1;
-            speed_count <= 0;
+            speed_count <= 0; run_mask <= 4'b0000;
         end else begin
             speed_count <= speed_count + 1'b1;
             if (mode != M_RUN || paused || speed_sel == 0 || speed_count == speed_limit) speed_count <= 0;
@@ -65,18 +72,18 @@ module sys_ctrl #(
                 M_EDIT: begin
                     if (clear_pulse || random_pulse) begin
                         gen_random <= random_pulse; mode <= M_GEN_REQ;
-                    end else if (run_pulse) begin load_ptr <= 0; mode <= M_LOAD; end
+                    end else if (run_ok) begin load_ptr <= 0; run_mask <= run_sel; mode <= M_LOAD; end
                 end
                 M_LOAD: if (load_ptr == NUM_CELLS-1) mode <= M_START;
                         else load_ptr <= load_ptr + 1'b1;
                 M_START: begin paused <= 1'b0; mode <= M_RUN; end
                 M_RUN: begin
                     if (pause_pulse) begin paused <= 1'b1; mode <= M_PAUSE; end
-                    else if (&engines_done) mode <= M_DONE;
+                    else if (all_sel_done) mode <= M_DONE;
                 end
                 M_PAUSE: if (pause_pulse) begin paused <= 1'b0; mode <= M_RUN; end
                 M_DONE: if (clear_pulse || random_pulse) begin gen_random <= random_pulse; mode <= M_GEN_REQ; end
-                        else if (run_pulse) begin load_ptr <= 0; mode <= M_LOAD; end
+                        else if (run_ok) begin load_ptr <= 0; run_mask <= run_sel; mode <= M_LOAD; end
                 default: mode <= M_EDIT;
             endcase
         end

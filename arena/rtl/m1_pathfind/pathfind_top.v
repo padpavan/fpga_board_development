@@ -3,12 +3,14 @@
 //////////////////////////////////////////////////////////////////////////////
 // Member 1 - engine cluster (CONTRACT.md section 5)
 //
-// Instantiates the BFS, Dijkstra and A* engines and fans out the shared
+// Instantiates the BFS, Dijkstra, A* and DFS engines and fans out the shared
 // maze-load, run control and cell_rd_addr so all three engines receive
 // identical frozen-maze data and launch concurrently on one `start` pulse.
+// run_mask gates `start` per engine: an unselected engine never starts and
+// keeps its previous status; the controller ignores it (CONTRACT v1.5).
 //
-// Every other section 4 port is per engine, prefixed bfs_ / dij_ / ast_.
-// M3 integrates only this module.  M2 owns the u_astar instance.
+// Every other section 4 port is per engine, prefixed bfs_ / dij_ / ast_ / dfs_.
+// M3 integrates only this module.  M2 owns the u_astar and u_dfs instances.
 //////////////////////////////////////////////////////////////////////////////
 module pathfind_top #(
     parameter COLS    = `ARENA_COLS,
@@ -29,6 +31,7 @@ module pathfind_top #(
 
     // shared run control
     input  wire                 start,
+    input  wire [3:0]           run_mask,     // {dfs, ast, dij, bfs}: 1 = this engine runs (CONTRACT v1.5 5)
     input  wire [INDEX_W-1:0]   start_idx,
     input  wire [INDEX_W-1:0]   goal_idx,
 
@@ -90,7 +93,25 @@ module pathfind_top #(
     output wire [DIST_W-1:0]    ast_expansions,
 
     // A* debug (CONTRACT 0: optional dbg_ output, may be left unconnected)
-    output wire [3:0]           ast_dbg_state
+    output wire [3:0]           ast_dbg_state,
+
+    // DFS status
+    output wire                 dfs_busy,
+    output wire                 dfs_done,
+    output wire                 dfs_found,
+    output wire                 dfs_no_path,
+
+    // DFS path readback
+    input  wire [INDEX_W-1:0]   dfs_path_rd_addr,
+    output wire [INDEX_W-1:0]   dfs_path_rd_data,
+    output wire [DIST_W-1:0]    dfs_path_cells,
+    output wire [DIST_W-1:0]    dfs_path_cost,
+
+    // DFS live view + stats
+    output wire [INDEX_W-1:0]   dfs_current,
+    output wire [1:0]           dfs_cell_state,
+    output wire [CNT_W-1:0]     dfs_cycles,
+    output wire [DIST_W-1:0]    dfs_expansions
 );
     bfs_engine #(
         .COLS(COLS), .ROWS(ROWS), .COST_W(COST_W),
@@ -98,7 +119,7 @@ module pathfind_top #(
     ) u_bfs (
         .clk(clk), .rst(rst), .step_en(step_en),
         .load_we(load_we), .load_addr(load_addr), .load_data(load_data),
-        .start(start), .start_idx(start_idx), .goal_idx(goal_idx),
+        .start(start && run_mask[0]), .start_idx(start_idx), .goal_idx(goal_idx),
         .busy(bfs_busy), .done(bfs_done), .found(bfs_found), .no_path(bfs_no_path),
         .path_rd_addr(bfs_path_rd_addr), .path_rd_data(bfs_path_rd_data),
         .path_cells(bfs_path_cells), .path_cost(bfs_path_cost),
@@ -113,7 +134,7 @@ module pathfind_top #(
     ) u_dijkstra (
         .clk(clk), .rst(rst), .step_en(step_en),
         .load_we(load_we), .load_addr(load_addr), .load_data(load_data),
-        .start(start), .start_idx(start_idx), .goal_idx(goal_idx),
+        .start(start && run_mask[1]), .start_idx(start_idx), .goal_idx(goal_idx),
         .busy(dij_busy), .done(dij_done), .found(dij_found), .no_path(dij_no_path),
         .path_rd_addr(dij_path_rd_addr), .path_rd_data(dij_path_rd_data),
         .path_cells(dij_path_cells), .path_cost(dij_path_cost),
@@ -128,7 +149,7 @@ module pathfind_top #(
     ) u_astar (
         .clk(clk), .rst(rst), .step_en(step_en),
         .load_we(load_we), .load_addr(load_addr), .load_data(load_data),
-        .start(start), .start_idx(start_idx), .goal_idx(goal_idx),
+        .start(start && run_mask[2]), .start_idx(start_idx), .goal_idx(goal_idx),
         .busy(ast_busy), .done(ast_done), .found(ast_found), .no_path(ast_no_path),
         .path_rd_addr(ast_path_rd_addr), .path_rd_data(ast_path_rd_data),
         .path_cells(ast_path_cells), .path_cost(ast_path_cost),
@@ -136,5 +157,20 @@ module pathfind_top #(
         .cell_rd_addr(cell_rd_addr), .cell_state(ast_cell_state),
         .cycles(ast_cycles), .expansions(ast_expansions),
         .dbg_state(ast_dbg_state)
+    );
+
+    dfs_engine #(
+        .COLS(COLS), .ROWS(ROWS), .COST_W(COST_W),
+        .DIST_W(DIST_W), .INDEX_W(INDEX_W), .CNT_W(CNT_W)
+    ) u_dfs (
+        .clk(clk), .rst(rst), .step_en(step_en),
+        .load_we(load_we), .load_addr(load_addr), .load_data(load_data),
+        .start(start && run_mask[3]), .start_idx(start_idx), .goal_idx(goal_idx),
+        .busy(dfs_busy), .done(dfs_done), .found(dfs_found), .no_path(dfs_no_path),
+        .path_rd_addr(dfs_path_rd_addr), .path_rd_data(dfs_path_rd_data),
+        .path_cells(dfs_path_cells), .path_cost(dfs_path_cost),
+        .current(dfs_current),
+        .cell_rd_addr(cell_rd_addr), .cell_state(dfs_cell_state),
+        .cycles(dfs_cycles), .expansions(dfs_expansions)
     );
 endmodule

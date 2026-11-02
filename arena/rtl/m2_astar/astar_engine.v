@@ -157,12 +157,27 @@ module astar_engine #(
     wire [INDEX_W-1:0] os_pop_idx;
 
     // ------------------------------------------- neighbour of u in `dir` --
-    wire [INDEX_W-1:0] nb_v;
-    wire               nb_valid;
+    // Registered one cycle early, from the values cur/dir are about to take
+    // (POP_WAIT takes a cell -> its dir 0; NB_WR advances dir), so in NB the
+    // neighbour index comes straight from flops instead of cur/dir -> adder
+    // -> LUTRAM reads -> relax.  Same cycle count; NB is always entered from
+    // one of those two updates, so nb_v is always for the current cur/dir.
+    wire               pw_take = (state == S_POP_WAIT) && os_pop_valid && !os_pop_empty;
+    wire               nw_adv  = step_en && (state == S_NB_WR) && os_ready;
+    wire [INDEX_W-1:0] cur_nx  = pw_take ? os_pop_idx : cur;
+    wire [1:0]         dir_nx  = pw_take ? 2'd0 : nw_adv ? dir + 1'b1 : dir;
+    wire [INDEX_W-1:0] nb_v_nx;
+    wire               nb_valid_nx;
+    reg  [INDEX_W-1:0] nb_v     = {INDEX_W{1'b0}};
+    reg                nb_valid = 1'b0;
 
     ast_neighbour #(.COLS(COLS), .ROWS(ROWS), .INDEX_W(INDEX_W)) u_nb (
-        .u_idx(cur), .dir(dir), .v_idx(nb_v), .v_valid(nb_valid)
+        .u_idx(cur_nx), .dir(dir_nx), .v_idx(nb_v_nx), .v_valid(nb_valid_nx)
     );
+    always @(posedge clk) begin
+        nb_v     <= nb_v_nx;
+        nb_valid <= nb_valid_nx;
+    end
 
     // ------------------------------------------------ heuristic h(x, goal) --
     // SEED needs h(start); every NB cycle needs h(neighbour).

@@ -12,4 +12,19 @@ Owner-editable (Tier 2). Binding rules live in `/CONTRACT.md`.
 - `sys_ctrl`: EDIT → LOAD → RUN ↔ PAUSE → DONE.
 
 ## Decisions log
-- _(add entries here: date, what, why)_
+- 2026-11-02 (made by M2 for CONTRACT v1.5, the 4th engine + engine selection; review welcome):
+  - `sys_ctrl`:
+    - `engines_done` is 4 bits.
+    - New `run_sel` input (`sw[5:2]`) is latched into `run_mask` on BTNC; BTNC with nothing selected is ignored.
+    - DONE = all *selected* engines done.
+  - `arena_top`:
+    - DFS and `run_mask` wired through.
+    - The LEDs are masked by `run_mask`; `led[14:12]` = DFS.
+    - `OLED_SNAP_DIV` parameter (10 Hz default, small in simulation).
+  - `vga_render`: the bottom-right quadrant (was the legend) is DFS (pink path 15,6,10). Unselected quadrants show only the maze, with a grey header.
+  - `oled_stats` (new): the snapshot block moved here from `arena_top`, plus finish place (rank by `cycles`, ties share) and binary→BCD.
+  - `oled_dashboard` rewritten: two lines per engine, `BFS #1 CY 001204` / `E192 K0026 FOUND`, `OFF` if not selected.
+- 2026-11-02 (by M2, 100 MHz timing of the full `arena_top`, which had never been built before): three paths failed post-route (WNS -5 ns):
+  1. VGA pixel counter → cell divide → shared `maze_ram` read → engine load bus. Fix: `maze_ram` got a dedicated `load_raddr`/`load_rdata` port, and `arena_top` registers the load bus one cycle (the last cell is written on the `start` edge while `busy` = 0, which §4.1 allows).
+  2. MouseCtl `xpos/ypos` → divide by 40 → `sys_ctrl` edit compare → `maze_ram` write. Fix: `mouse_if` registers `cell_idx`/`cursor_valid`, keeping them aligned with the (already registered) click pulses.
+  3. A DFS-internal path (fixed in M2's `dfs_engine`).

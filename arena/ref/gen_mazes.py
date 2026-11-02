@@ -10,11 +10,14 @@ Writes into arena/sim/mazes/:
                      cells on the fewest-step path, i.e. BFS cells)
   <name>.ast.expect  start goal found ast_cost ast_cells ast_expansions
                      (M2-only: the exact values astar_engine must produce)
+  <name>.dfs.expect  start goal found dfs_cost dfs_cells dfs_expansions dfs_cycles
+                     (M2-only: the exact values dfs_engine must produce)
 
 Then self-checks the reference model itself and prints PASS / FAIL:
   * every returned path is contiguous, wall-free and its cost adds up
   * dij_cost == ast_cost on every run   (both are minimum-cost)
   * bfs_cost == dij_cost on unit-cost mazes
+  * dfs finds a path exactly when the others do, and dfs_cost >= dij_cost
 """
 
 import os
@@ -23,7 +26,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from arena_ref import (COLS, ROWS, NUM_CELLS, WALL, astar, bfs, check_path,
-                       dijkstra, save_mem)
+                       dfs, dijkstra, save_mem)
 
 OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "sim", "mazes")
 
@@ -125,37 +128,47 @@ MAZES += [("rand%d" % s, maze_random(1000 + s)) for s in range(8)]
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)
     errors = []
-    print("%-12s %5s %5s %5s %5s %5s %5s %5s %7s %7s"
-          % ("maze", "start", "goal", "found", "bfs", "dij", "ast", "cells", "dij_exp", "ast_exp"))
+    print("%-12s %5s %5s %5s %5s %5s %5s %5s %5s %7s %7s %7s"
+          % ("maze", "start", "goal", "found", "bfs", "dij", "ast", "dfs", "cells",
+             "dij_exp", "ast_exp", "dfs_exp"))
 
     for name, (costs, runs, desc) in MAZES:
         save_mem(os.path.join(OUT_DIR, name + ".mem"), costs, "%s : %s" % (name, desc))
         unit_cost = all(c in (WALL, 1) for c in costs)
-        shared, ast_only = [], []
+        shared, ast_only, dfs_only = [], [], []
 
         for (s, t) in runs:
             rb, rd, ra = bfs(costs, s, t), dijkstra(costs, s, t), astar(costs, s, t)
+            rf = dfs(costs, s, t)
             tag = "%s %d->%d" % (name, s, t)
 
             # Validate every algorithm's path on its own terms.
-            for alg, r, steps in (("bfs", rb, True), ("dij", rd, False), ("ast", ra, False)):
+            for alg, r, steps in (("bfs", rb, True), ("dij", rd, False), ("ast", ra, False),
+                                  ("dfs", rf, False)):
                 errors += ["%s %s: %s" % (tag, alg, e) for e in check_path(costs, s, t, r, steps)]
-            if not (rb.found == rd.found == ra.found):
+            if not (rb.found == rd.found == ra.found == rf.found):
                 errors.append("%s: algorithms disagree on found" % tag)
             if rd.cost != ra.cost:
                 errors.append("%s: dij_cost %d != ast_cost %d" % (tag, rd.cost, ra.cost))
+            if rf.cost < rd.cost:
+                errors.append("%s: dfs_cost %d < dij_cost %d (impossible)" % (tag, rf.cost, rd.cost))
             if unit_cost and rb.cost != rd.cost:
                 errors.append("%s: unit-cost maze but bfs %d != dij %d" % (tag, rb.cost, rd.cost))
 
             shared.append("%d %d %d %d %d %d %d" % (s, t, int(ra.found), rb.cost, rd.cost, ra.cost, rb.cells))
             ast_only.append("%d %d %d %d %d %d" % (s, t, int(ra.found), ra.cost, ra.cells, ra.expansions))
-            print("%-12s %5d %5d %5d %5d %5d %5d %5d %7d %7d"
-                  % (name, s, t, ra.found, rb.cost, rd.cost, ra.cost, ra.cells, rd.expansions, ra.expansions))
+            dfs_only.append("%d %d %d %d %d %d %d" % (s, t, int(rf.found), rf.cost, rf.cells,
+                                                     rf.expansions, rf.cycles))
+            print("%-12s %5d %5d %5d %5d %5d %5d %5d %5d %7d %7d %7d"
+                  % (name, s, t, ra.found, rb.cost, rd.cost, ra.cost, rf.cost, ra.cells,
+                     rd.expansions, ra.expansions, rf.expansions))
 
         with open(os.path.join(OUT_DIR, name + ".expect"), "w") as f:
             f.write("\n".join(shared) + "\n")
         with open(os.path.join(OUT_DIR, name + ".ast.expect"), "w") as f:
             f.write("\n".join(ast_only) + "\n")
+        with open(os.path.join(OUT_DIR, name + ".dfs.expect"), "w") as f:
+            f.write("\n".join(dfs_only) + "\n")
 
     print()
     for e in errors:

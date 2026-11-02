@@ -12,6 +12,8 @@ What it provides
   * astar()             : minimum-COST path that mirrors M2's astar_engine
                           cycle-for-cycle in its *decisions*, so the expected
                           `expansions` count and the exact path are predictable.
+  * dfs()               : depth-first path (NOT shortest) that mirrors M2's
+                          dfs_engine exactly: path, expansions and cycles.
   * check_path()        : validates a path (contiguous, no walls, cost sum)
 
 Grid constants are parsed from arena/rtl/common/arena_defs.vh so this model can
@@ -106,7 +108,7 @@ def save_mem(path, costs, comment=""):
 
 
 # --------------------------------------------------------------------------
-# Result record shared by all three algorithms
+# Result record shared by all four algorithms
 # --------------------------------------------------------------------------
 class Result:
     def __init__(self, found=False, path=None, cost=0, expansions=0):
@@ -230,6 +232,66 @@ def astar(costs, start, goal):
 
 
 # --------------------------------------------------------------------------
+# DFS : mirrors rtl/m2_astar/dfs_engine.v (explicit stack, fixed U/D/L/R order)
+#
+# Hardware rules reproduced exactly:
+#   * the start is pushed first (expansion 1).  A cell is "expanded" when it
+#     is pushed and becomes the top of the stack; the goal counts too.
+#   * the top cell probes dir 0..3 (up, down, left, right), one dir per
+#     clock, off-grid dirs included.  The first open, unvisited neighbour is
+#     pushed and probing restarts at dir 0 on that new top.
+#   * if all four dirs fail, the top is popped (a dead end) and its parent is
+#     re-probed from dir 0 (already-visited cells are skipped).
+#   * the search stops the moment the goal is pushed; the stack is the path.
+#   * path_cost = sum of cost[v] over entered cells (weighted, like Dijkstra).
+#   * DFS gives *a* path, not a shortest one.
+#
+# Returns a Result with an extra `cycles` attribute: the exact CONTRACT 4.3
+# cycle count of the hardware FSM:
+#   CLEAR (NUM_CELLS) + PUSH_START (1) + one per probe + MARK (path_cells)
+#   + FINISH (1).  A wall endpoint finishes right after CLEAR: NUM_CELLS + 1.
+# --------------------------------------------------------------------------
+def _dirs(idx):
+    """All four directions in hardware order; None where off-grid."""
+    r, c = row_col(idx)
+    return [idx - COLS if r > 0 else None,
+            idx + COLS if r < ROWS - 1 else None,
+            idx - 1 if c > 0 else None,
+            idx + 1 if c < COLS - 1 else None]
+
+
+def dfs(costs, start, goal):
+    if not _endpoints_ok(costs, start, goal):
+        res = Result()
+        res.cycles = NUM_CELLS + 1
+        return res
+    cycles = NUM_CELLS + 1                      # CLEAR + PUSH_START
+    visited = {start}
+    stack = [start]
+    expansions = 1
+    found = start == goal
+    while stack and not found:
+        u = stack[-1]
+        for v in _dirs(u):
+            cycles += 1                         # one probe per direction
+            if v is not None and costs[v] != WALL and v not in visited:
+                visited.add(v)
+                stack.append(v)
+                expansions += 1
+                found = v == goal
+                break
+        else:
+            stack.pop()                         # dead end (pop in the dir-3 cycle)
+    if not found:
+        res = Result(expansions=expansions)
+        res.cycles = cycles + 1                 # + FINISH
+        return res
+    res = Result(True, list(stack), sum(costs[c] for c in stack[1:]), expansions)
+    res.cycles = cycles + len(stack) + 1        # + MARK + FINISH
+    return res
+
+
+# --------------------------------------------------------------------------
 # Path validator (used by the self-check in gen_mazes.py)
 # --------------------------------------------------------------------------
 def check_path(costs, start, goal, res, unit_steps=False):
@@ -286,7 +348,7 @@ if __name__ == "__main__":
         sys.exit(2)
     maze = load_mem(sys.argv[1])
     s, t = int(sys.argv[2]), int(sys.argv[3])
-    for name, fn in (("BFS", bfs), ("Dijkstra", dijkstra), ("A*", astar)):
+    for name, fn in (("BFS", bfs), ("Dijkstra", dijkstra), ("A*", astar), ("DFS", dfs)):
         r = fn(maze, s, t)
         print("%-9s found=%d cost=%d cells=%d expansions=%d"
               % (name, r.found, r.cost, r.cells, r.expansions))
