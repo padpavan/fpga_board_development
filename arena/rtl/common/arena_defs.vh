@@ -7,7 +7,7 @@
 //
 //   `include "arena_defs.vh"
 //
-// Contract version: 1.0
+// Contract version: 1.5
 //////////////////////////////////////////////////////////////////////////////
 `ifndef ARENA_DEFS_VH
 `define ARENA_DEFS_VH
@@ -15,7 +15,7 @@
 // ---------------------------------------------------------------- clocks ---
 `define ARENA_CLK_HZ        100_000_000   // system clock (W5)
 `define ARENA_OLED_CLK_DIV  16            // 100 MHz / 16 = 6.25 MHz for Oled_Display
-`define ARENA_PIX_TICK_DIV  4             // 100 MHz / 4  = 25 MHz VGA pixel tick (clock-enable)
+`define ARENA_PIX_CLK_HZ    148_500_000   // VGA pixel clock (MMCM in m3_io/vga_clkgen), 1080p60
 
 // ------------------------------------------------------------- maze grid ---
 `define ARENA_COLS          16
@@ -49,8 +49,8 @@
 `define ARENA_ENG_AST       2'd2
 
 // ------------------------------------------------------- display sizes ---
-`define ARENA_VGA_H         640
-`define ARENA_VGA_V         480
+`define ARENA_VGA_H         1920
+`define ARENA_VGA_V         1080
 `define ARENA_OLED_W        96
 `define ARENA_OLED_H        64
 

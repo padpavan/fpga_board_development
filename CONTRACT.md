@@ -1,6 +1,6 @@
 # CONTRACT.md: FPGA Pathfinding Arena (Group S1_18)
 
-**Version 1.4** · Basys 3 (xc7a35tcpg236-1) · Verilog-2001
+**Version 1.5** · Basys 3 (xc7a35tcpg236-1) · Verilog-2001
 
 This file is the integration contract for the three members' work. Read it fully **before** writing any project code, whether you're a human or an AI agent. It defines only what crosses a member boundary. Everything inside a member's own block is that member's choice.
 
@@ -84,8 +84,9 @@ arena/                      <- THE integrated project
 |---|---|
 | Language | Verilog-2001 (`.v`). VHDL is allowed only for third-party IP in `arena/ip/`. |
 | System clock | Port `clk`, 100 MHz, pin W5. **All logic runs on `clk`.** |
-| Slower rates | Use a 1-cycle **clock-enable tick** on `clk` (e.g. VGA pixel tick every 4 cycles = 25 MHz). Do not create new clocks. |
-| Only exception | `Oled_Display` is clocked by `clk6p25m` from `common/clk_div` (`DIV=16`). Only `Oled_Display` and the logic that generates its `pixel_data` may use that clock. |
+| Slower rates | Use a 1-cycle **clock-enable tick** on `clk`. Do not create new clocks, except the two below. |
+| Exception 1 | `Oled_Display` is clocked by `clk6p25m` from `common/clk_div` (`DIV=16`). Only `Oled_Display` and the logic that generates its `pixel_data` may use that clock. |
+| Exception 2 | VGA runs on `clk_pix`, 148.5 MHz (`ARENA_PIX_CLK_HZ`) from the MMCM in `m3_io/vga_clkgen`, for 1920×1080 @ 60 Hz. Only `vga_timing`, `vga_render` and the pixel side of `vga_cdc` use it. 100 MHz values reach it only through `vga_cdc` (toggle handshake, applied once per frame) or as async LUTRAM reads (`maze_ram` VGA ports, engine `cell_state`); a read during a write can at worst mis-colour one pixel for one frame. The XDC declares the two clocks asynchronous. |
 | Reset | `rst`: **synchronous, active-high**, 1 = reset. Generated in `arena_top` from BTNU (debounced). Every stateful module has a `rst` input. |
 | Button inputs | Always pass through `common/debounce_btn` (2-FF synchroniser + lockout → 1-cycle `press_pulse`). |
 | Switch inputs | Pass through a 2-FF synchroniser before use. |
@@ -167,7 +168,7 @@ module <bfs_engine | dijkstra_engine | astar_engine> #(
 5. **Reset:** `rst` returns the engine to idle (`busy = done = found = no_path = 0`, counters 0). Clearing the private maze copy on reset is optional, because the controller always reloads before a run.
 
 ### 4.2 `cell_state` (for VGA overlays)
-Combinational (async) read of `cell_rd_addr`, valid at any time, and independent of the engine's own memory reads, so VGA can read all three engines in parallel every pixel without stalling the search.
+Combinational (async) read of `cell_rd_addr`, valid at any time, and independent of the engine's own memory reads, so VGA can read all three engines in parallel every pixel without stalling the search. Since v1.5 `cell_rd_addr` is driven from the `clk_pix` domain (§2 exception 2); engines need no change, because the read is combinational.
 
 | Code | Macro | Meaning |
 |---|---|---|
@@ -261,11 +262,11 @@ Suggested `sys_ctrl` states: **EDIT** (mouse edits / generator writes `maze_ram`
 
 **[T2: default] Controls** (M3 may change; record in `m3_io/INTERFACE.md`):
 - **Buttons:** BTNC = start run / confirm · BTNL = pause/resume · BTNR = clear maze · BTND = generate random maze.
-- **Switches:** `sw[1:0]` = edit tool (00 wall, 01 start, 10 goal, 11 weight) · `sw[15:13]` = animation speed (000 = full speed … 111 = slowest).
-- **Mouse:** left = apply tool, right = erase.
+- **Switches:** `sw[1:0]` = edit tool (00 wall, 01 start, 10 goal, 11 weight) · `sw[2]` = VGA theme (0 classic, 1 Pac-Man) · `sw[15:13]` = animation speed (000 = full speed … 111 = slowest).
+- **Mouse:** left = apply tool, right = erase, wheel = zoom the RUN view about the cursor (1×–8×), middle = reset zoom.
 - **LEDs:** `led[2:0]` = BFS busy/done/found, `led[5:3]` = Dijkstra, `led[8:6]` = A*.
 
-**[T2: default] VGA:** 640×480 @ 60 Hz, 25 MHz pixel tick, RGB444. EDIT mode: one full-screen grid with 40 px cells (16×40 = 640, 12×40 = 480). RUN mode: 2×2 quadrants of 320×240 with 20 px cells (BFS, Dijkstra, A*, legend). Both layouts divide exactly.
+**[T2: default] VGA:** 1920×1080 @ 60 Hz, 148.5 MHz pixel clock (§2), RGB444, active-high syncs. EDIT mode: one grid of 90 px square cells (1440×1080, centred), help text in the left margin. RUN mode: 2×2 quadrants of 960×540 (BFS, Dijkstra, A*, legend); 45 px cells at 1×, and the three algorithm quadrants share one zoom/pan view.
 
 ## 10. Verification rules [T1 minimum]
 
@@ -321,3 +322,4 @@ The code already in the repo predates this contract. These changes bring it into
 | 1.2 | 2026-11-01 | §1: `AGENTS.md` removed (it duplicated `CLAUDE.md`); `CLAUDE.md` is the only agent pointer. Proposal PDF moved to `docs/`. No Tier-1 interface changes. |
 | 1.3 | 2026-11-01 | §1: standalone GPT7 course lab (`GPT7.xpr`, `GPT7.srcs/`) removed from the repo; it was never part of the arena build and stays in git history. No Tier-1 interface changes. |
 | 1.4 | 2026-11-01 | §1: shared Vivado project `pathfinder.xpr` added at the repo root (sources referenced from `arena/`, not copied); `docs/` listed. No Tier-1 interface changes. |
+| 1.5 | 2026-11-04 | §2: second clock exception, `clk_pix` 148.5 MHz (MMCM) for 1920×1080 VGA. `arena_defs.vh`: `ARENA_VGA_H/V` = 1920/1080, `ARENA_PIX_CLK_HZ` replaces `ARENA_PIX_TICK_DIV`. §4.2: `cell_rd_addr` now driven from `clk_pix` (no engine change). §9 defaults: 1080p layout, wheel zoom, middle-click reset, `sw[2]` Pac-Man theme. Also gives a version to the 2026-11-02 change-process edit in §0, which had none. |

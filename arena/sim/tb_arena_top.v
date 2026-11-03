@@ -7,7 +7,9 @@ module tb_arena_top;
  wire [3:0] vga_r,vga_g,vga_b; wire vga_hs,vga_vs;
  tri1 ps2_clk,ps2_data;
  wire oled_cs,oled_sdin,oled_sclk,oled_d_cn,oled_resn,oled_vccen,oled_pmoden;
- integer errors=0;
+ integer errors=0, hs_edges=0;
+ reg hs_d=0;
+ always @(posedge dut.clk_pix) begin hs_d <= vga_hs; if (vga_hs===1'b1 && hs_d===1'b0) hs_edges = hs_edges + 1; end
  always #5 clk=~clk;
  arena_top #(.DEBOUNCE_LOCKOUT(3)) dut(
   .clk(clk),.btnU(btnU),.btnC(btnC),.btnL(btnL),.btnR(btnR),.btnD(btnD),.sw(sw),.led(led),.seg(seg),.dp(dp),.an(an),
@@ -20,7 +22,10 @@ module tb_arena_top;
   repeat(220) @(negedge clk);
   if(!dut.edit_mode) errors=errors+1;
   if(seg!==7'b1111111 || dp!==1'b1 || an!==4'b1111) errors=errors+1;
-  if(!vga_hs || !vga_vs) errors=errors+1;
+  // 1080p pixel clock: MMCM locks, then hsync (active-high) pulses every 2200 pixels
+  wait(dut.pix_locked); #50000;
+  if(hs_edges < 3) begin errors=errors+1; $display("FAIL: hsync edges %0d", hs_edges); end
+  if(vga_vs!==1'b0 && vga_vs!==1'b1) errors=errors+1;
   if(errors==0) $display("PASS: tb_arena_top errors=0"); else $display("FAIL: tb_arena_top errors=%0d",errors);
   $finish;
  end
