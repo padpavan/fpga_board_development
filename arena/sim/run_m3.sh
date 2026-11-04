@@ -20,6 +20,10 @@ run_one tb_maze_gen rtl/m3_io/maze_gen.v
 run_one tb_mouse_if rtl/m3_io/mouse_if.v
 run_one tb_sys_ctrl rtl/m3_io/sys_ctrl.v
 run_one tb_vga_timing rtl/m3_io/vga_timing.v
-run_one tb_vga_render rtl/m3_io/vga_render.v
+run_one tb_vga_render rtl/m3_io/vga_render.v rtl/m3_io/vga_timing.v
+run_one tb_vga_zoom rtl/m3_io/vga_zoom.v
+run_one tb_vga_cdc rtl/m3_io/vga_cdc.v
 run_one tb_oled_dashboard rtl/m3_io/oled_dashboard.v
+# tb_arena_top needs the Xilinx unisim MMCM model (vga_clkgen), so run it in
+# Vivado xsim: xelab -L unisims_ver tb_arena_top glbl
 echo "PASS: M3 unit test suite"

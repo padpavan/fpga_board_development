@@ -10,6 +10,12 @@
 set_property -dict { PACKAGE_PIN W5   IOSTANDARD LVCMOS33 } [get_ports clk]
 create_clock -add -name sys_clk_pin -period 10.00 -waveform {0 5} [get_ports clk]
 
+## 148.5 MHz VGA pixel clock: MMCM in m3_io/vga_clkgen (instance u_vga_clk),
+## derived automatically by Vivado. The 100 MHz and pixel domains only meet
+## through vga_cdc (toggle handshake, applied once per frame) and quasi-static
+## LUTRAM reads (maze_ram VGA ports, engine cell_state), so they are async.
+set_clock_groups -asynchronous -group [get_clocks sys_clk_pin] -group [get_clocks -of_objects [get_pins u_vga_clk/u_mmcm/CLKOUT0]]
+
 ## 6.25 MHz OLED clock from common/clk_div (instance u_oled_clk in arena_top).
 ## Uncomment once arena_top exists and the path is confirmed:
 # create_generated_clock -name clk6p25m -source [get_ports clk] -divide_by 16 [get_pins u_oled_clk/clk_out_reg/Q]

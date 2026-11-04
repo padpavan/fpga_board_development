@@ -64,7 +64,7 @@ module dij_min_heap #(
     reg [DIST_W-1:0]  l_key, r_key;
 
     // memory read data
-    wire [INDEX_W-1:0] a_idx, b_idx, pos_rdata;
+    wire [INDEX_W-1:0] a_idx, b_idx, pos_ram, pos_rdata;
     wire [DIST_W-1:0]  a_key, b_key;
 
     // -------- heap arithmetic (one bit wider so 2p+2 can't overflow) -------
@@ -125,11 +125,23 @@ module dij_min_heap #(
         .raddr(b_raddr), .rdata(b_key)
     );
 
-    // pos[cell] = heap position of that cell (written for every entry placed)
+    // pos[cell] = heap position of that cell (written for every entry placed).
+    // The write is registered one cycle so the sift compare (which picks w_idx)
+    // stays off the LUTRAM write-enable decode; a read of the cell whose write
+    // is still pending is forwarded.
+    reg               pos_we_d = 1'b0;
+    reg [INDEX_W-1:0] pos_waddr_d, pos_wdata_d;
+    always @(posedge clk) begin
+        pos_we_d    <= heap_we;
+        pos_waddr_d <= w_idx;
+        pos_wdata_d <= hole;
+    end
+
     grid_mem #(.ADDR_W(INDEX_W), .DATA_W(INDEX_W)) u_pos (
-        .clk(clk), .we(heap_we), .waddr(w_idx), .wdata(hole),
-        .raddr(push_idx), .rdata(pos_rdata)
+        .clk(clk), .we(pos_we_d), .waddr(pos_waddr_d), .wdata(pos_wdata_d),
+        .raddr(push_idx), .rdata(pos_ram)
     );
+    assign pos_rdata = (pos_we_d && pos_waddr_d == push_idx) ? pos_wdata_d : pos_ram;
 
     assign ready   = (state == S_IDLE);
     assign empty   = (size == 0);

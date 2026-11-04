@@ -36,6 +36,7 @@ module arena_top #(
     reg [1:0] mouse_cfg;
     reg [11:0] mouse_value;
     wire [11:0] mouse_x, mouse_y;
+    wire [3:0] mouse_z;
     wire mouse_left, mouse_middle, mouse_right, mouse_event;
     wire setmax_x = (mouse_cfg == 2'd1);
     wire setmax_y = (mouse_cfg == 2'd2);
@@ -45,8 +46,8 @@ module arena_top #(
     end
     always @* mouse_value = (mouse_cfg == 2'd1) ? (`ARENA_VGA_H-1) : (`ARENA_VGA_V-1);
     MouseCtl #(.SYSCLK_FREQUENCY_HZ(`ARENA_CLK_HZ)) u_mouse (
-        .clk(clk), .rst(rst), .xpos(mouse_x), .ypos(mouse_y), .zpos(),
-        .left(mouse_left), .middle(), .right(mouse_right), .new_event(mouse_event),
+        .clk(clk), .rst(rst), .xpos(mouse_x), .ypos(mouse_y), .zpos(mouse_z),
+        .left(mouse_left), .middle(mouse_middle), .right(mouse_right), .new_event(mouse_event),
         .value(mouse_value), .setx(1'b0), .sety(1'b0), .setmax_x(setmax_x), .setmax_y(setmax_y),
         .ps2_clk(ps2_clk), .ps2_data(ps2_data)
     );
@@ -84,19 +85,23 @@ module arena_top #(
         .step_en(step_en),.edit_mode(edit_mode),.start_idx(start_idx),.goal_idx(goal_idx),
         .mode(mode),.paused(paused),.run_mask(run_mask)
     );
+    // VGA read addresses / data (clk_pix domain): cell, up, down, left, right
+    wire [INDEX_W-1:0] vga_up_addr, vga_dn_addr, vga_lf_addr, vga_rt_addr;
+    wire [COST_W-1:0] vga_up_cost, vga_dn_cost, vga_lf_cost, vga_rt_cost;
     maze_ram u_maze_ram (
         .clk(clk),.rst(rst),.we(gen_we || maze_we),
         .waddr(gen_we ? gen_addr : maze_waddr),.wdata(gen_we ? gen_data : maze_wdata),
-        .raddr(maze_rd_addr),.rdata(maze_cost),
-        .load_raddr(load_addr),.load_rdata(maze_load_cost)
+        .raddr(load_addr),.rdata(maze_load_cost),
+        .vga_addr0(maze_rd_addr),.vga_addr1(vga_up_addr),.vga_addr2(vga_dn_addr),
+        .vga_addr3(vga_lf_addr),.vga_addr4(vga_rt_addr),
+        .vga_data0(maze_cost),.vga_data1(vga_up_cost),.vga_data2(vga_dn_cost),
+        .vga_data3(vga_lf_cost),.vga_data4(vga_rt_cost)
     );
-    // The load bus has its own maze_ram read port and is registered here.
-    // Before, the VGA pixel counter -> cell-address divide -> shared
-    // maze_ram read -> every engine's cost RAM write data was one
-    // combinational path (post-route WNS -5 ns at 100 MHz).
-    // The bus is one cycle late, so the last cell (191) is written on the
-    // same edge the engines sample `start`, while busy is still 0 (allowed,
-    // CONTRACT 4.1.1), and CLEAR reads the cost RAM only after that.
+    // The load bus is registered one cycle before it fans out to the four
+    // engines' cost RAMs (100 MHz timing).  The last cell (191) is then
+    // written on the same edge the engines sample `start`, while busy is
+    // still 0 (allowed, CONTRACT 4.1.1), and CLEAR reads the cost RAM only
+    // after that.
     reg                load_we_q;
     reg [INDEX_W-1:0]  load_addr_q;
     reg [COST_W-1:0]   load_data_q;
@@ -140,26 +145,79 @@ module arena_top #(
         .dfs_cycles(dfs_cycles),.dfs_expansions(dfs_exp)
     );
 
-    // VGA async maze read; all four independent engine state reads use the same cell address.
-    wire pixel_tick, active_video, hs, vs;
-    wire [9:0] px, py;
-    vga_timing u_vga_timing (.clk(clk),.rst(rst),.pixel_tick(pixel_tick),.active_video(active_video),
-        .x(px),.y(py),.hsync(hs),.vsync(vs));
-    wire [3:0] vr,vg,vb;
-    vga_render u_vga_render (
-        .x(px),.y(py),.active_video(active_video),.edit_mode(edit_mode),
-        .cursor_valid(cursor_valid),.cursor_idx(mouse_idx),
-        .start_idx(start_idx),.goal_idx(goal_idx),.cell_addr(maze_rd_addr),.cell_cost(maze_cost),
-        .bfs_state(bfs_state),.dij_state(dij_state),.ast_state(ast_state),.dfs_state(dfs_state),
-        .bfs_current(bfs_current),.dij_current(dij_current),.ast_current(ast_current),.dfs_current(dfs_current),
-        .run_mask(run_mask),
-        .red(vr),.green(vg),.blue(vb)
+    // ---------------- VGA: 1920x1080 @ 60 Hz on clk_pix (148.5 MHz) ----------------
+    localparam FRAC=20, OW=28, KW=16;
+    wire clk_pix, pix_locked;
+    vga_clkgen u_vga_clk (.clk(clk),.clk_pix(clk_pix),.locked(pix_locked));
+
+    // stretch the 1-cycle rst so the pixel domain samples it, then synchronise
+    reg [3:0] rst_hold = 4'hF;
+    always @(posedge clk)
+        if (rst) rst_hold <= 4'hF; else if (rst_hold != 0) rst_hold <= rst_hold - 1'b1;
+    (* ASYNC_REG = "TRUE" *) reg rst_pix_m = 1'b1, rst_pix = 1'b1;
+    always @(posedge clk_pix) begin
+        rst_pix_m <= (|rst_hold) || !pix_locked;
+        rst_pix   <= rst_pix_m;
+    end
+
+    // scroll-wheel zoom of the RUN view (100 MHz domain, next to the mouse)
+    wire signed [OW-1:0] zoom_ox, zoom_oy;
+    wire [KW-1:0] zoom_k;
+    wire [2:0] zoom_level;
+    vga_zoom #(.FRAC(FRAC),.OW(OW),.KW(KW)) u_vga_zoom (
+        .clk(clk),.rst(rst),.enable(!edit_mode),
+        .new_event(mouse_event),.zpos(mouse_z),.middle(mouse_middle),
+        .mouse_x(mouse_x),.mouse_y(mouse_y),
+        .ox(zoom_ox),.oy(zoom_oy),.k(zoom_k),.level(zoom_level)
     );
-    assign vga_r = active_video ? vr : 4'd0;
-    assign vga_g = active_video ? vg : 4'd0;
-    assign vga_b = active_video ? vb : 4'd0;
-    assign vga_hs = hs;
-    assign vga_vs = vs;
+
+    // everything the renderer needs from the 100 MHz side, moved across once per frame
+    localparam VIEW_W = 2*OW + KW + 3 + 12 + 12 + 1 + INDEX_W + 1 + 1 + 2 + 6*INDEX_W + 4;
+    wire [VIEW_W-1:0] view_a = {zoom_ox, zoom_oy, zoom_k, zoom_level, mouse_x, mouse_y,
+        cursor_valid, mouse_idx, edit_mode, sw_sync[6], sw_sync[1:0],
+        start_idx, goal_idx, bfs_current, dij_current, ast_current, dfs_current, run_mask};
+    wire [VIEW_W-1:0] view_p;
+    wire view_tick;
+    vga_cdc #(.W(VIEW_W)) u_vga_cdc (
+        .clk_a(clk),.rst_a(rst),.din(view_a),
+        .clk_b(clk_pix),.rst_b(rst_pix),.apply_b(view_tick),.dout(view_p)
+    );
+    wire signed [OW-1:0] v_ox, v_oy;
+    wire [KW-1:0] v_k;
+    wire [2:0] v_level;
+    wire [11:0] v_mouse_x, v_mouse_y;
+    wire v_cursor_valid, v_edit, v_pacman;
+    wire [1:0] v_tool;
+    wire [INDEX_W-1:0] v_cursor_idx, v_start, v_goal, v_bfs_cur, v_dij_cur, v_ast_cur, v_dfs_cur;
+    wire [3:0] v_run_mask;
+    assign {v_ox, v_oy, v_k, v_level, v_mouse_x, v_mouse_y, v_cursor_valid, v_cursor_idx,
+            v_edit, v_pacman, v_tool, v_start, v_goal, v_bfs_cur, v_dij_cur, v_ast_cur,
+            v_dfs_cur, v_run_mask} = view_p;
+
+    wire active_video, hs, vs;
+    wire [11:0] px;
+    wire [10:0] py;
+    vga_timing u_vga_timing (.clk(clk_pix),.rst(rst_pix),.active_video(active_video),
+        .x(px),.y(py),.hsync(hs),.vsync(vs),.view_tick(view_tick));
+    // The engines' cell_state ports and maze_ram's VGA ports are async LUTRAM
+    // reads addressed from clk_pix; all four engines share one cell address.
+    vga_render #(.FRAC(FRAC),.OW(OW),.KW(KW)) u_vga_render (
+        .clk(clk_pix),.rst(rst_pix),
+        .x(px),.y(py),.active_video(active_video),.hsync_in(hs),.vsync_in(vs),
+        .edit_mode(v_edit),.pacman(v_pacman),
+        .run_ox(v_ox),.run_oy(v_oy),.run_k(v_k),.zoom_level(v_level),
+        .mouse_x(v_mouse_x),.mouse_y(v_mouse_y),
+        .cursor_valid(v_cursor_valid),.cursor_idx(v_cursor_idx),.edit_tool(v_tool),
+        .start_idx(v_start),.goal_idx(v_goal),
+        .bfs_current(v_bfs_cur),.dij_current(v_dij_cur),.ast_current(v_ast_cur),.dfs_current(v_dfs_cur),
+        .run_mask(v_run_mask),
+        .cell_addr(maze_rd_addr),.up_addr(vga_up_addr),.dn_addr(vga_dn_addr),
+        .lf_addr(vga_lf_addr),.rt_addr(vga_rt_addr),
+        .cell_cost(maze_cost),.up_cost(vga_up_cost),.dn_cost(vga_dn_cost),
+        .lf_cost(vga_lf_cost),.rt_cost(vga_rt_cost),
+        .bfs_state(bfs_state),.dij_state(dij_state),.ast_state(ast_state),.dfs_state(dfs_state),
+        .red(vga_r),.green(vga_g),.blue(vga_b),.hsync(vga_hs),.vsync(vga_vs)
+    );
 
     // Snapshot + finish order + decimal conversion for the OLED (CONTRACT 8):
     // oled_stats registers everything in the 100 MHz domain; the 6.25 MHz

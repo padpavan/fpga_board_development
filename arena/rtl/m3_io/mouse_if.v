@@ -1,15 +1,16 @@
 `timescale 1ns / 1ps
 `include "arena_defs.vh"
 // Convert Digilent MouseCtl reports into cell-indexed press events.
-// cell_idx / cursor_valid are registered: the divide by the cell size feeds
-// the maze edit path, and in one cycle with it the path misses 100 MHz.
-// left/right_pulse are registered too, so they stay aligned with cell_idx.
+// The cell mapping matches vga_render's EDIT layout: square cells, grid
+// centred horizontally.  Division by the cell size is a multiply by its
+// reciprocal (exact over the whole screen; checked by tb_mouse_if).
+// cell_idx / cursor_valid are registered (1 clk after xpos / ypos).
 module mouse_if #(
     parameter INDEX_W = `ARENA_INDEX_W,
     parameter COLS = `ARENA_COLS,
     parameter ROWS = `ARENA_ROWS,
-    parameter CELL_W = `ARENA_VGA_H/COLS,
-    parameter CELL_H = `ARENA_VGA_V/ROWS
+    parameter H_VISIBLE = `ARENA_VGA_H,
+    parameter V_VISIBLE = `ARENA_VGA_V
 ) (
     input wire clk, input wire rst,
     input wire [11:0] xpos, input wire [11:0] ypos,
@@ -18,23 +19,29 @@ module mouse_if #(
     output reg [INDEX_W-1:0] cell_idx,
     output reg cursor_valid
 );
+    localparam CELL_X = H_VISIBLE/COLS, CELL_Y = V_VISIBLE/ROWS;
+    localparam CELL = (CELL_X < CELL_Y) ? CELL_X : CELL_Y;          // 90
+    localparam X0 = (H_VISIBLE - COLS*CELL)/2;                      // 240
+    localparam Y0 = (V_VISIBLE - ROWS*CELL)/2;                      // 0
+    localparam SH = 18;
+    localparam [13:0] RECIP = ((1 << SH) + CELL - 1)/CELL;          // ceil(2^18 / CELL)
+    wire in_x = (xpos >= X0) && (xpos < X0 + COLS*CELL);
+    wire in_y = (ypos >= Y0) && (ypos < Y0 + ROWS*CELL);
+    wire [11:0] ex = xpos - X0;
+    wire [11:0] ey = ypos - Y0;
+    wire [25:0] col_p = ex * RECIP;
+    wire [25:0] row_p = ey * RECIP;
+    wire [INDEX_W-1:0] col = col_p[SH +: INDEX_W];
+    wire [INDEX_W-1:0] row = row_p[SH +: INDEX_W];
     reg left_prev, right_prev;
-    wire [11:0] col = xpos / CELL_W;
-    wire [11:0] row = ypos / CELL_H;
-    wire valid_now = (col < COLS) && (row < ROWS);
-    always @(posedge clk) begin
-        if (rst) begin
-            cell_idx <= {INDEX_W{1'b0}}; cursor_valid <= 1'b0;
-        end else begin
-            cursor_valid <= valid_now;
-            cell_idx <= valid_now ? row*COLS + col : {INDEX_W{1'b0}};
-        end
-    end
     always @(posedge clk) begin
         if (rst) begin
             left_prev <= 1'b0; right_prev <= 1'b0;
             left_pulse <= 1'b0; right_pulse <= 1'b0;
+            cell_idx <= {INDEX_W{1'b0}}; cursor_valid <= 1'b0;
         end else begin
+            cursor_valid <= in_x && in_y;
+            cell_idx <= (in_x && in_y) ? row*COLS + col : {INDEX_W{1'b0}};
             left_pulse <= 1'b0; right_pulse <= 1'b0;
             if (new_event) begin
                 left_pulse <= left_down && !left_prev;

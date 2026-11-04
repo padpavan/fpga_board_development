@@ -51,12 +51,14 @@ cd "$WORK"
 
 src=()
 for f in "$ARENA"/rtl/*/*.v "$ARENA"/sim/tb_*.v; do src+=("$(path "$f")"); done
+# glbl + unisims: vga_clkgen's MMCM (only elaborated by tb_arena_top)
+src+=("$(path "$BIN/../data/verilog/src/glbl.v")")
 vhd=()
 for f in "$ARENA"/ip/*.vhd; do vhd+=("$(path "$f")"); done
 
 tool xvhdl "${vhd[@]}" > xvhdl.out 2>&1 || { cat xvhdl.out; exit 1; }
 tool xvlog -i "$(path "$ARENA/rtl/common")" "${src[@]}" > xvlog.out 2>&1 || { grep -E "ERROR" xvlog.out; exit 1; }
-tool xelab "work.$TB" -s "snap_$TB" > xelab.out 2>&1 || { grep -E "ERROR" xelab.out; exit 1; }
+tool xelab "work.$TB" work.glbl -L unisims_ver -s "snap_$TB" > xelab.out 2>&1 || { grep -E "ERROR" xelab.out; exit 1; }
 
 # plusargs go through an options file: cmd.exe would split "maze=rand5" at '='
 : > xsim_args.txt
