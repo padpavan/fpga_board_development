@@ -1,13 +1,13 @@
 # CONTRACT.md: FPGA Pathfinding Arena (Group S1_18)
 
-**Version 1.5** · Basys 3 (xc7a35tcpg236-1) · Verilog-2001
+**Version 1.6** · Basys 3 (xc7a35tcpg236-1) · Verilog-2001
 
 This file is the integration contract for the three members' work. Read it fully **before** writing any project code, whether you're a human or an AI agent. It defines only what crosses a member boundary. Everything inside a member's own block is that member's choice.
 
 | Member | Name | Area |
 |---|---|---|
 | **M1** | Baranikumar Saritha Padmanaban | Grid storage, queues, BFS + Dijkstra engines |
-| **M2** | Karthik Sivasubramanian | A* engine, heuristic arithmetic, profiling / reference model |
+| **M2** | Karthik Sivasubramanian | A* and DFS engines, heuristic arithmetic, profiling / reference model |
 | **M3** | Gopinathan Maiyuri | Maze generation, mouse, VGA, OLED, system control, top-level integration |
 
 ---
@@ -63,7 +63,7 @@ arena/                      <- THE integrated project
   rtl/m1_pathfind/          <- M1 owns
     bfs_engine.v, dijkstra_engine.v, pathfind_top.v, (queues, heaps, ...)
   rtl/m2_astar/             <- M2 owns
-    astar_engine.v, manhattan.v, (profiling helpers, ...)
+    astar_engine.v, dfs_engine.v, manhattan.v, (profiling helpers, ...)
   rtl/m3_io/                <- M3 owns
     arena_top.v, sys_ctrl, maze_ram, maze_gen/lfsr, mouse_if, vga_*, oled_dashboard
   ip/                       <- third-party files (Digilent MouseCtl + Ps2Interface)
@@ -111,10 +111,10 @@ M3's master `maze_ram` (written by the LFSR generator and the mouse, read by VGA
 
 ## 4. Search-engine interface [T1]
 
-All three engines, `bfs_engine` (M1), `dijkstra_engine` (M1) and `astar_engine` (M2), have **exactly this port list** (`dbg_*` outputs may be added). Because they're interchangeable, M3 can integrate and test with any one engine before the others are ready.
+All four engines, `bfs_engine` (M1), `dijkstra_engine` (M1), `astar_engine` (M2) and `dfs_engine` (M2), have **exactly this port list** (`dbg_*` outputs may be added). Because they're interchangeable, M3 can integrate and test with any one engine before the others are ready.
 
 ```verilog
-module <bfs_engine | dijkstra_engine | astar_engine> #(
+module <bfs_engine | dijkstra_engine | astar_engine | dfs_engine> #(
     parameter COLS    = `ARENA_COLS,      // 16
     parameter ROWS    = `ARENA_ROWS,      // 12
     parameter COST_W  = `ARENA_COST_W,    // 4
@@ -168,7 +168,7 @@ module <bfs_engine | dijkstra_engine | astar_engine> #(
 5. **Reset:** `rst` returns the engine to idle (`busy = done = found = no_path = 0`, counters 0). Clearing the private maze copy on reset is optional, because the controller always reloads before a run.
 
 ### 4.2 `cell_state` (for VGA overlays)
-Combinational (async) read of `cell_rd_addr`, valid at any time, and independent of the engine's own memory reads, so VGA can read all three engines in parallel every pixel without stalling the search. Since v1.5 `cell_rd_addr` is driven from the `clk_pix` domain (§2 exception 2); engines need no change, because the read is combinational.
+Combinational (async) read of `cell_rd_addr`, valid at any time, and independent of the engine's own memory reads, so VGA can read all four engines in parallel every pixel without stalling the search. Since v1.5 `cell_rd_addr` is driven from the `clk_pix` domain (§2 exception 2); engines need no change, because the read is combinational.
 
 | Code | Macro | Meaning |
 |---|---|---|
@@ -185,9 +185,9 @@ M2 owns these definitions (profiling). Every engine must count the same way, or 
 | Signal | Definition |
 |---|---|
 | `cycles` | Number of `clk` cycles with `step_en = 1` from the cycle after `start` is accepted up to and including the cycle `done` rises. Includes init/clear, search and path reconstruction. **Saturates** at all-ones. Animation pauses (`step_en = 0`) are never counted. |
-| `expansions` | Number of nodes removed from the frontier and expanded/settled, including the goal. Saturates. |
+| `expansions` | Number of nodes removed from the frontier and expanded/settled, including the goal. For DFS: number of cells pushed onto the stack (each becomes `current` once), start and goal included. Saturates. |
 | `path_cells` | Cells on the reported path, start and goal included. `0` if `no_path`. |
-| `path_cost` | Sum of `cost[v]` over every cell entered after start (§3). **Exception:** BFS ignores weights, so for BFS `path_cost` = number of steps (`path_cells - 1`). `0` if `no_path`. |
+| `path_cost` | Sum of `cost[v]` over every cell entered after start (§3). **Exception:** BFS ignores weights, so for BFS `path_cost` = number of steps (`path_cells - 1`). DFS also ignores weights when searching, but reports the weighted sum of the path it found, so it compares directly with Dijkstra/A*. `0` if `no_path`. |
 
 ### 4.4 Required behaviour on edge cases
 | Case | Result |
@@ -200,16 +200,18 @@ M2 owns these definitions (profiling). Every engine must count the same way, or 
 - **BFS:** returns a minimum-**step** path.
 - **Dijkstra:** returns a minimum-**cost** path using §3 edge costs. M1 chooses between a heap, a linear scan or anything else.
 - **A\*:** returns a minimum-**cost** path. The heuristic is Manhattan distance `|dr| + |dc|` (admissible because every non-wall cost is ≥ 1). The tie-breaking rule and queue design are M2's choice.
-- When several optimal paths exist, any one is acceptable. Tests compare costs, not exact cells.
+- **DFS:** returns **a** valid path, not necessarily a shortest one (the "blind search" baseline). Neighbours are tried in the fixed order up, down, left, right. It must find a path exactly when one exists. `cell_state`: FRONTIER = on the current stack branch, VISITED = backtracked dead end, PATH = final path.
+- When several optimal paths exist, any one is acceptable. Tests compare costs, not exact cells (DFS is checked exactly against M2's reference model).
 
 ## 5. `pathfind_top`: the engine cluster [T1]
 
-`m1_pathfind/pathfind_top.v` (owned by M1) instantiates all three engines and fans out the shared inputs. M3 integrates only this module.
+`m1_pathfind/pathfind_top.v` (owned by M1) instantiates all four engines and fans out the shared inputs. M3 integrates only this module.
 
-- **Shared inputs:** `clk, rst, step_en, load_we, load_addr, load_data, start, start_idx, goal_idx, cell_rd_addr`. The same maze load and start pulse go to all three engines, so they launch together.
-- **Per-engine outputs/inputs:** every other §4 port, renamed with the prefix `bfs_`, `dij_` or `ast_` (e.g. `ast_done`, `dij_cell_state`, `bfs_path_rd_addr`). Each engine gets its own `*_path_rd_addr`.
+- **Shared inputs:** `clk, rst, step_en, load_we, load_addr, load_data, start, start_idx, goal_idx, cell_rd_addr`. The same maze load and start pulse go to all four engines, so they launch together.
+- **`run_mask[3:0]`** (`{dfs, ast, dij, bfs}`, v1.6): engine *i* receives `start && run_mask[i]`. An unselected engine doesn't start and keeps its previous status; the controller and displays ignore it.
+- **Per-engine outputs/inputs:** every other §4 port, renamed with the prefix `bfs_`, `dij_`, `ast_` or `dfs_` (e.g. `ast_done`, `dij_cell_state`, `bfs_path_rd_addr`, `dfs_cycles`). Each engine gets its own `*_path_rd_addr`.
 - `dbg_*` ports may be forwarded with the same prefixes.
-- M2 adds/updates the `u_astar` instance in this file through a small PR. This is the one agreed cross-folder edit.
+- M2 adds/updates the `u_astar` and `u_dfs` instances in this file through a small PR. This is the one agreed cross-folder edit.
 - Until a real engine is ready, a **stub with the exact port list** is used (M2's stub: `m2_astar/astar_engine.v`), so the cluster always compiles.
 
 ## 6. Reusable blocks [T2: default]
@@ -227,19 +229,20 @@ The only Tier-1 parts are the engine handshake (§4) and the frozen-maze rule (�
 ```
  mouse_if ─┐                         ┌──────────── pathfind_top ─────────────┐
  maze_gen ─┼─► maze_ram (master) ──LOAD bus──► bfs_engine  dijkstra  astar   │
- buttons ──┤        │                └──────┬───────────────────────────┬────┘
- switches ─┴─► sys_ctrl ── start / step_en ─┘   cell_state x3, current  │ stats x3
+ buttons ──┤        │                └──────┬───── (+ dfs_engine) ───────┬────┘
+ switches ─┴─► sys_ctrl ── start / step_en ─┘   cell_state x4, current  │ stats x4
                     │                                    │              │
                     └──────────────────────────► vga_render       metrics latch ─► oled_dashboard
 ```
 
-Suggested `sys_ctrl` states: **EDIT** (mouse edits / generator writes `maze_ram`) → **LOAD** (stream all 192 cells into the engines over the load bus, 1 cell/clk) → **RUN** (pulse `start`; drive `step_en` from the speed and pause controls) → **DONE** (all three `done`; show results) → back to EDIT. **PAUSE** holds `step_en = 0`.
+Suggested `sys_ctrl` states: **EDIT** (mouse edits / generator writes `maze_ram`) → **LOAD** (stream all 192 cells into the engines over the load bus, 1 cell/clk) → **RUN** (pulse `start`; drive `step_en` from the speed and pause controls) → **DONE** (every *selected* engine `done`; show results) → back to EDIT. **PAUSE** holds `step_en = 0`. The engine selection (`sw[5:2]`) is latched into `run_mask` when the run starts; a run with nothing selected is ignored.
 
 ## 8. Metrics to the OLED [T1 for the signals, T2 for the screen]
 
 - **[T1]** The OLED dashboard shows only the §4.3 signals (`cycles`, `expansions`, `path_cells`, `path_cost`) and status (`busy/done/found/no_path`) of each engine. No other engine data may be required.
 - **[T1]** Clock-domain crossing: the 100 MHz values are copied into a **snapshot register** in the 100 MHz domain (on each engine's `done` rising edge and/or a slow ~10 Hz tick). The 6.25 MHz OLED logic reads **only** the snapshot. Since the values change rarely, a one-frame glitch at worst is acceptable.
-- **[T2: default]** Screen: 96×64, RGB565, one row per algorithm (BFS / DIJ / A*), showing cycles, expansions and path cost, with a colour that matches the VGA overlay of the same algorithm.
+- **[T2: default]** Screen: 96×64, RGB565, two text lines per algorithm (BFS / DIJ / A* / DFS), in decimal: finish place (`#1`..`#4`), cycles, expansions, path cost and status (FOUND / NOPTH / BUSY / IDLE, or OFF when not selected). Colours match the VGA overlay of the same algorithm.
+- **Finish place** (derived only from the §4.3 signals): all engines start on the same edge and share `step_en`, so for a selected, done engine *e*, place = 1 + the number of other selected, done engines with fewer `cycles`. Ties share a place.
 
 ## 9. Top-level ports and pin ownership [T1]
 
@@ -253,7 +256,7 @@ Suggested `sys_ctrl` states: **EDIT** (mouse edits / generator writes `maze_ram`
 | `sw[15:0]` | Basys 3 standard | M3; `sw[12:9]` reserved for M1/M2 debug selects |
 | `led[8:0]` | | M3: engine status |
 | `led[11:9]` | | **M1 debug** (via `dbg_` ports) |
-| `led[14:12]` | | **M2 debug** (via `dbg_` ports) |
+| `led[14:12]` | | **M2**: DFS status `{found, done, busy}` |
 | `led[15]` | | M3 heartbeat / mode |
 | `seg[6:0]`, `dp`, `an[3:0]` | active-low | M3 |
 | `vga_r[3:0]`, `vga_g[3:0]`, `vga_b[3:0]`, `vga_hs`, `vga_vs` | VGA connector | M3 |
@@ -262,11 +265,11 @@ Suggested `sys_ctrl` states: **EDIT** (mouse edits / generator writes `maze_ram`
 
 **[T2: default] Controls** (M3 may change; record in `m3_io/INTERFACE.md`):
 - **Buttons:** BTNC = start run / confirm · BTNL = pause/resume · BTNR = clear maze · BTND = generate random maze.
-- **Switches:** `sw[1:0]` = edit tool (00 wall, 01 start, 10 goal, 11 weight) · `sw[2]` = VGA theme (0 classic, 1 Pac-Man) · `sw[15:13]` = animation speed (000 = full speed … 111 = slowest).
+- **Switches:** `sw[1:0]` = edit tool (00 wall, 01 start, 10 goal, 11 weight) · `sw[5:2]` = engines to run (`sw[2]` BFS, `sw[3]` Dijkstra, `sw[4]` A*, `sw[5]` DFS) · `sw[6]` = VGA theme (0 classic, 1 Pac-Man) · `sw[15:13]` = animation speed (000 = full speed … 111 = slowest).
 - **Mouse:** left = apply tool, right = erase, wheel = zoom the RUN view about the cursor (1×–8×), middle = reset zoom.
-- **LEDs:** `led[2:0]` = BFS busy/done/found, `led[5:3]` = Dijkstra, `led[8:6]` = A*.
+- **LEDs:** `led[2:0]` = BFS busy/done/found, `led[5:3]` = Dijkstra, `led[8:6]` = A*, `led[14:12]` = DFS (dark when that engine isn't selected).
 
-**[T2: default] VGA:** 1920×1080 @ 60 Hz, 148.5 MHz pixel clock (§2), RGB444, active-high syncs. EDIT mode: one grid of 90 px square cells (1440×1080, centred), help text in the left margin. RUN mode: 2×2 quadrants of 960×540 (BFS, Dijkstra, A*, legend); 45 px cells at 1×, and the three algorithm quadrants share one zoom/pan view.
+**[T2: default] VGA:** 1920×1080 @ 60 Hz, 148.5 MHz pixel clock (§2), RGB444, active-high syncs. EDIT mode: one grid of 90 px square cells (1440×1080, centred), help text in the left margin. RUN mode: 2×2 quadrants of 960×540 (BFS, Dijkstra, A*, DFS); 45 px cells at 1×, and all four quadrants share one zoom/pan view. An unselected engine's quadrant shows only the maze, with a grey header. The legend is a half-size text strip in the DFS quadrant's right margin (outside the grid at 1×).
 
 ## 10. Verification rules [T1 minimum]
 
@@ -276,6 +279,7 @@ Suggested `sys_ctrl` states: **EDIT** (mouse edits / generator writes `maze_ram`
    - Unit-cost mazes: `bfs.path_cost == dij.path_cost == ast.path_cost`.
    - All mazes: `dij.path_cost == ast.path_cost`, and both match the reference model.
    - Usually `ast.expansions ≤ dij.expansions`. Report it, but a violation isn't a failure.
+   - DFS: `dfs.found == bfs.found` on every run, and `dfs.path_cost ≥ dij.path_cost` (DFS is not shortest-path).
 4. M2 maintains a software reference model in `arena/ref/` that generates the expected values for each maze.
 5. Testbenches use a 100 MHz clock (`always #5 clk = ~clk;`) and drive `rst` high for at least 2 cycles at the start.
 
@@ -303,9 +307,10 @@ The code already in the repo predates this contract. These changes bring it into
 - [ ] Extend `pathfind_top` with `step_en`, `cell_rd_addr` and the `ast_*` prefix group (§5); update `tb_bfs`, `tb_dijkstra`, `tb_pathfind`.
 
 **M2**
-- [ ] Replace the `astar_engine` stub with the real engine (§4.5).
-- [ ] Write `manhattan.v` + `tb_manhattan.v`.
-- [ ] Write the reference model in `arena/ref/` and the expected results for the shared mazes.
+- [x] Replace the `astar_engine` stub with the real engine (§4.5).
+- [x] Write `manhattan.v` + `tb_manhattan.v`.
+- [x] Write the reference model in `arena/ref/` and the expected results for the shared mazes.
+- [x] v1.6: add `dfs_engine` + `tb_dfs_engine`, DFS in the reference model (`<name>.dfs.expect`), and wire it through `pathfind_top`, `arena_top`, `sys_ctrl`, `vga_render` and `oled_dashboard`.
 
 **M3**
 - [x] `ip/`: add Digilent `MouseCtl.vhd` **and its dependency `Ps2Interface.vhd`**. Both are now in `arena/ip/`; `MouseCtl` moved from the old GPT5 lab, which has been removed.
@@ -323,3 +328,4 @@ The code already in the repo predates this contract. These changes bring it into
 | 1.3 | 2026-11-01 | §1: standalone GPT7 course lab (`GPT7.xpr`, `GPT7.srcs/`) removed from the repo; it was never part of the arena build and stays in git history. No Tier-1 interface changes. |
 | 1.4 | 2026-11-01 | §1: shared Vivado project `pathfinder.xpr` added at the repo root (sources referenced from `arena/`, not copied); `docs/` listed. No Tier-1 interface changes. |
 | 1.5 | 2026-11-04 | §2: second clock exception, `clk_pix` 148.5 MHz (MMCM) for 1920×1080 VGA. `arena_defs.vh`: `ARENA_VGA_H/V` = 1920/1080, `ARENA_PIX_CLK_HZ` replaces `ARENA_PIX_TICK_DIV`. §4.2: `cell_rd_addr` now driven from `clk_pix` (no engine change). §9 defaults: 1080p layout, wheel zoom, middle-click reset, `sw[2]` Pac-Man theme. Also gives a version to the 2026-11-02 change-process edit in §0, which had none. |
+| 1.6 | 2026-11-04 | **Tier-1:** fourth engine `dfs_engine` (M2, `m2_astar/`; written 2026-11-02 as "1.5" on a branch, renumbered when merged after the 1080p v1.5). §4/§4.3/§4.5: DFS port list, metric and path rules (any valid path, fixed U/D/L/R order). §5: `dfs_` prefix group and `u_dfs` instance in `pathfind_top`. §8: four OLED rows. §9: `led[14:12]` = DFS status (was M2 debug); VGA RUN bottom-right quadrant = DFS (was the legend; the legend is now a half-size strip in that quadrant's right margin). §10.3: DFS cross-check rules. `arena_defs.vh`: `ARENA_ENG_DFS`. §5: `run_mask[3:0]` shared input (per-engine start gate). §7/§9: `sw[5:2]` engine selection, DONE = all selected engines done; the Pac-Man theme switch moves from `sw[2]` to `sw[6]`. §8: OLED shows finish place (rule in §8) and decimal values. M1 (`pathfind_top`) and M3 (`arena_top`, `sys_ctrl`, `vga_render`, `oled_dashboard`) files updated by M2 per §0. |

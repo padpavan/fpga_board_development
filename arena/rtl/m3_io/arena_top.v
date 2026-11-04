@@ -3,7 +3,8 @@
 // Integrated Basys 3 top for the FPGA Pathfinding Arena.
 module arena_top #(
     parameter DEBOUNCE_LOCKOUT=20_000_000,
-    parameter GEN_CELLS=`ARENA_NUM_CELLS
+    parameter GEN_CELLS=`ARENA_NUM_CELLS,
+    parameter OLED_SNAP_DIV=`ARENA_CLK_HZ/10     // OLED stats refresh (10 Hz); small in simulation
 ) (
     input wire clk,
     input wire btnU, input wire btnC, input wire btnL, input wire btnR, input wire btnD,
@@ -64,9 +65,10 @@ module arena_top #(
     wire [COST_W-1:0] gen_data;
     wire maze_we, edit_mode, load_we, start_search, step_en, paused;
     wire [INDEX_W-1:0] maze_waddr, load_addr, start_idx, goal_idx, maze_rd_addr;
-    wire [COST_W-1:0] maze_wdata, maze_cost, load_data;
+    wire [COST_W-1:0] maze_wdata, maze_cost, maze_load_cost;
     wire [2:0] mode;
-    wire [2:0] eng_done;
+    wire [3:0] eng_done;
+    wire [3:0] run_mask;                 // {dfs, ast, dij, bfs}, latched from sw[5:2] on BTNC
     maze_gen #(.NUM_CELLS(GEN_CELLS)) u_maze_gen (
         .clk(clk),.rst(rst),.start(gen_start),.randomize(gen_random),
         .start_idx(start_idx),.goal_idx(goal_idx),
@@ -77,11 +79,11 @@ module arena_top #(
         .clk(clk),.rst(rst),.run_pulse(run_pulse),.pause_pulse(pause_pulse),
         .clear_pulse(clear_pulse),.random_pulse(random_pulse),.speed_sel(sw_sync[15:13]),
         .mouse_left(mouse_left_pulse && cursor_valid),.mouse_right(mouse_right_pulse && cursor_valid),
-        .mouse_idx(mouse_idx),.edit_tool(sw_sync[1:0]),.gen_busy(gen_busy),.gen_done(gen_done),.engines_done(eng_done),
+        .mouse_idx(mouse_idx),.edit_tool(sw_sync[1:0]),.gen_busy(gen_busy),.gen_done(gen_done),.engines_done(eng_done),.run_sel(sw_sync[5:2]),
         .gen_start(gen_start),.gen_random(gen_random),.maze_we(maze_we),.maze_addr(maze_waddr),
         .maze_data(maze_wdata),.load_we(load_we),.load_addr(load_addr),.start_pulse(start_search),
         .step_en(step_en),.edit_mode(edit_mode),.start_idx(start_idx),.goal_idx(goal_idx),
-        .mode(mode),.paused(paused)
+        .mode(mode),.paused(paused),.run_mask(run_mask)
     );
     // VGA read addresses / data (clk_pix domain): cell, up, down, left, right
     wire [INDEX_W-1:0] vga_up_addr, vga_dn_addr, vga_lf_addr, vga_rt_addr;
@@ -89,28 +91,42 @@ module arena_top #(
     maze_ram u_maze_ram (
         .clk(clk),.rst(rst),.we(gen_we || maze_we),
         .waddr(gen_we ? gen_addr : maze_waddr),.wdata(gen_we ? gen_data : maze_wdata),
-        .raddr(load_addr),.rdata(load_data),
+        .raddr(load_addr),.rdata(maze_load_cost),
         .vga_addr0(maze_rd_addr),.vga_addr1(vga_up_addr),.vga_addr2(vga_dn_addr),
         .vga_addr3(vga_lf_addr),.vga_addr4(vga_rt_addr),
         .vga_data0(maze_cost),.vga_data1(vga_up_cost),.vga_data2(vga_dn_cost),
         .vga_data3(vga_lf_cost),.vga_data4(vga_rt_cost)
     );
+    // The load bus is registered one cycle before it fans out to the four
+    // engines' cost RAMs (100 MHz timing).  The last cell (191) is then
+    // written on the same edge the engines sample `start`, while busy is
+    // still 0 (allowed, CONTRACT 4.1.1), and CLEAR reads the cost RAM only
+    // after that.
+    reg                load_we_q;
+    reg [INDEX_W-1:0]  load_addr_q;
+    reg [COST_W-1:0]   load_data_q;
+    always @(posedge clk) begin
+        load_we_q   <= load_we && !rst;
+        load_addr_q <= load_addr;
+        load_data_q <= maze_load_cost;
+    end
 
     wire bfs_busy,bfs_done,bfs_found,bfs_no_path;
     wire dij_busy,dij_done,dij_found,dij_no_path;
     wire ast_busy,ast_done,ast_found,ast_no_path;
+    wire dfs_busy,dfs_done,dfs_found,dfs_no_path;
     wire [DIST_W-1:0] bfs_cells,bfs_cost,bfs_exp;
     wire [DIST_W-1:0] dij_cells,dij_cost,dij_exp;
     wire [DIST_W-1:0] ast_cells,ast_cost,ast_exp;
-    wire [CNT_W-1:0] bfs_cycles,dij_cycles,ast_cycles;
-    wire [INDEX_W-1:0] bfs_current,dij_current,ast_current;
-    wire [1:0] bfs_state,dij_state,ast_state;
-    wire [INDEX_W-1:0] ignored_bfs_path, ignored_dij_path, ignored_ast_path;
-    wire [3:0] ast_debug;
-    assign eng_done = {ast_done,dij_done,bfs_done};
+    wire [DIST_W-1:0] dfs_cells,dfs_cost,dfs_exp;
+    wire [CNT_W-1:0] bfs_cycles,dij_cycles,ast_cycles,dfs_cycles;
+    wire [INDEX_W-1:0] bfs_current,dij_current,ast_current,dfs_current;
+    wire [1:0] bfs_state,dij_state,ast_state,dfs_state;
+    wire [INDEX_W-1:0] ignored_bfs_path, ignored_dij_path, ignored_ast_path, ignored_dfs_path;
+    assign eng_done = {dfs_done,ast_done,dij_done,bfs_done};
     pathfind_top u_pathfind (
-        .clk(clk),.rst(rst),.step_en(step_en),.load_we(load_we),.load_addr(load_addr),.load_data(load_data),
-        .start(start_search),.start_idx(start_idx),.goal_idx(goal_idx),.cell_rd_addr(maze_rd_addr),
+        .clk(clk),.rst(rst),.step_en(step_en),.load_we(load_we_q),.load_addr(load_addr_q),.load_data(load_data_q),
+        .start(start_search),.run_mask(run_mask),.start_idx(start_idx),.goal_idx(goal_idx),.cell_rd_addr(maze_rd_addr),
         .bfs_busy(bfs_busy),.bfs_done(bfs_done),.bfs_found(bfs_found),.bfs_no_path(bfs_no_path),
         .bfs_path_rd_addr({INDEX_W{1'b0}}),.bfs_path_rd_data(ignored_bfs_path),.bfs_path_cells(bfs_cells),
         .bfs_path_cost(bfs_cost),.bfs_current(bfs_current),.bfs_cell_state(bfs_state),
@@ -122,7 +138,11 @@ module arena_top #(
         .ast_busy(ast_busy),.ast_done(ast_done),.ast_found(ast_found),.ast_no_path(ast_no_path),
         .ast_path_rd_addr({INDEX_W{1'b0}}),.ast_path_rd_data(ignored_ast_path),.ast_path_cells(ast_cells),
         .ast_path_cost(ast_cost),.ast_current(ast_current),.ast_cell_state(ast_state),
-        .ast_cycles(ast_cycles),.ast_expansions(ast_exp),.ast_dbg_state(ast_debug)
+        .ast_cycles(ast_cycles),.ast_expansions(ast_exp),.ast_dbg_state(),
+        .dfs_busy(dfs_busy),.dfs_done(dfs_done),.dfs_found(dfs_found),.dfs_no_path(dfs_no_path),
+        .dfs_path_rd_addr({INDEX_W{1'b0}}),.dfs_path_rd_data(ignored_dfs_path),.dfs_path_cells(dfs_cells),
+        .dfs_path_cost(dfs_cost),.dfs_current(dfs_current),.dfs_cell_state(dfs_state),
+        .dfs_cycles(dfs_cycles),.dfs_expansions(dfs_exp)
     );
 
     // ---------------- VGA: 1920x1080 @ 60 Hz on clk_pix (148.5 MHz) ----------------
@@ -152,10 +172,10 @@ module arena_top #(
     );
 
     // everything the renderer needs from the 100 MHz side, moved across once per frame
-    localparam VIEW_W = 2*OW + KW + 3 + 12 + 12 + 1 + INDEX_W + 1 + 1 + 2 + 5*INDEX_W;
+    localparam VIEW_W = 2*OW + KW + 3 + 12 + 12 + 1 + INDEX_W + 1 + 1 + 2 + 6*INDEX_W + 4;
     wire [VIEW_W-1:0] view_a = {zoom_ox, zoom_oy, zoom_k, zoom_level, mouse_x, mouse_y,
-        cursor_valid, mouse_idx, edit_mode, sw_sync[2], sw_sync[1:0],
-        start_idx, goal_idx, bfs_current, dij_current, ast_current};
+        cursor_valid, mouse_idx, edit_mode, sw_sync[6], sw_sync[1:0],
+        start_idx, goal_idx, bfs_current, dij_current, ast_current, dfs_current, run_mask};
     wire [VIEW_W-1:0] view_p;
     wire view_tick;
     vga_cdc #(.W(VIEW_W)) u_vga_cdc (
@@ -168,9 +188,11 @@ module arena_top #(
     wire [11:0] v_mouse_x, v_mouse_y;
     wire v_cursor_valid, v_edit, v_pacman;
     wire [1:0] v_tool;
-    wire [INDEX_W-1:0] v_cursor_idx, v_start, v_goal, v_bfs_cur, v_dij_cur, v_ast_cur;
+    wire [INDEX_W-1:0] v_cursor_idx, v_start, v_goal, v_bfs_cur, v_dij_cur, v_ast_cur, v_dfs_cur;
+    wire [3:0] v_run_mask;
     assign {v_ox, v_oy, v_k, v_level, v_mouse_x, v_mouse_y, v_cursor_valid, v_cursor_idx,
-            v_edit, v_pacman, v_tool, v_start, v_goal, v_bfs_cur, v_dij_cur, v_ast_cur} = view_p;
+            v_edit, v_pacman, v_tool, v_start, v_goal, v_bfs_cur, v_dij_cur, v_ast_cur,
+            v_dfs_cur, v_run_mask} = view_p;
 
     wire active_video, hs, vs;
     wire [11:0] px;
@@ -178,7 +200,7 @@ module arena_top #(
     vga_timing u_vga_timing (.clk(clk_pix),.rst(rst_pix),.active_video(active_video),
         .x(px),.y(py),.hsync(hs),.vsync(vs),.view_tick(view_tick));
     // The engines' cell_state ports and maze_ram's VGA ports are async LUTRAM
-    // reads addressed from clk_pix; all three engines share one cell address.
+    // reads addressed from clk_pix; all four engines share one cell address.
     vga_render #(.FRAC(FRAC),.OW(OW),.KW(KW)) u_vga_render (
         .clk(clk_pix),.rst(rst_pix),
         .x(px),.y(py),.active_video(active_video),.hsync_in(hs),.vsync_in(vs),
@@ -187,43 +209,37 @@ module arena_top #(
         .mouse_x(v_mouse_x),.mouse_y(v_mouse_y),
         .cursor_valid(v_cursor_valid),.cursor_idx(v_cursor_idx),.edit_tool(v_tool),
         .start_idx(v_start),.goal_idx(v_goal),
-        .bfs_current(v_bfs_cur),.dij_current(v_dij_cur),.ast_current(v_ast_cur),
+        .bfs_current(v_bfs_cur),.dij_current(v_dij_cur),.ast_current(v_ast_cur),.dfs_current(v_dfs_cur),
+        .run_mask(v_run_mask),
         .cell_addr(maze_rd_addr),.up_addr(vga_up_addr),.dn_addr(vga_dn_addr),
         .lf_addr(vga_lf_addr),.rt_addr(vga_rt_addr),
         .cell_cost(maze_cost),.up_cost(vga_up_cost),.dn_cost(vga_dn_cost),
         .lf_cost(vga_lf_cost),.rt_cost(vga_rt_cost),
-        .bfs_state(bfs_state),.dij_state(dij_state),.ast_state(ast_state),
+        .bfs_state(bfs_state),.dij_state(dij_state),.ast_state(ast_state),.dfs_state(dfs_state),
         .red(vga_r),.green(vga_g),.blue(vga_b),.hsync(vga_hs),.vsync(vga_vs)
     );
 
-    // Stable 100 MHz snapshots feed the OLED pixel clock domain.
-    reg [CNT_W-1:0] bfs_cycles_snap,dij_cycles_snap,ast_cycles_snap;
-    reg [15:0] bfs_exp_snap,dij_exp_snap,ast_exp_snap;
-    reg [15:0] bfs_cells_snap,dij_cells_snap,ast_cells_snap;
-    reg [15:0] bfs_cost_snap,dij_cost_snap,ast_cost_snap;
-    reg [3:0] bfs_status_snap,dij_status_snap,ast_status_snap;
-    localparam SNAP_W=$clog2(`ARENA_CLK_HZ/10);
-    reg [SNAP_W-1:0] snap_div;
-    always @(posedge clk) begin
-        if (rst) snap_div <= 0;
-        else if (snap_div == (`ARENA_CLK_HZ/10)-1) snap_div <= 0;
-        else snap_div <= snap_div + 1'b1;
-        if (rst) begin
-            bfs_cycles_snap<=0; dij_cycles_snap<=0; ast_cycles_snap<=0;
-            bfs_exp_snap<=0; dij_exp_snap<=0; ast_exp_snap<=0;
-            bfs_cells_snap<=0; dij_cells_snap<=0; ast_cells_snap<=0;
-            bfs_cost_snap<=0; dij_cost_snap<=0; ast_cost_snap<=0;
-            bfs_status_snap<=0; dij_status_snap<=0; ast_status_snap<=0;
-        end else if (snap_div == (`ARENA_CLK_HZ/10)-1) begin
-            bfs_cycles_snap<=bfs_cycles; dij_cycles_snap<=dij_cycles; ast_cycles_snap<=ast_cycles;
-            bfs_exp_snap<=bfs_exp; dij_exp_snap<=dij_exp; ast_exp_snap<=ast_exp;
-            bfs_cells_snap<=bfs_cells; dij_cells_snap<=dij_cells; ast_cells_snap<=ast_cells;
-            bfs_cost_snap<=bfs_cost; dij_cost_snap<=dij_cost; ast_cost_snap<=ast_cost;
-            bfs_status_snap <= {bfs_busy,bfs_done,bfs_found,bfs_no_path};
-            dij_status_snap <= {dij_busy,dij_done,dij_found,dij_no_path};
-            ast_status_snap <= {ast_busy,ast_done,ast_found,ast_no_path};
-        end
-    end
+    // Snapshot + finish order + decimal conversion for the OLED (CONTRACT 8):
+    // oled_stats registers everything in the 100 MHz domain; the 6.25 MHz
+    // dashboard reads only those registers.
+    wire [3:0]  snap_mask;
+    wire [15:0] snap_status;
+    wire [11:0] snap_place;
+    wire [95:0] cyc_bcd;
+    wire [47:0] exp_bcd;
+    wire [63:0] cost_bcd;
+    oled_stats #(.SNAP_DIV(OLED_SNAP_DIV)) u_oled_stats (
+        .clk(clk),.rst(rst),.run_mask(run_mask),
+        .cycles({dfs_cycles,ast_cycles,dij_cycles,bfs_cycles}),
+        .expansions({dfs_exp,ast_exp,dij_exp,bfs_exp}),
+        .path_cost({dfs_cost,ast_cost,dij_cost,bfs_cost}),
+        .busy({dfs_busy,ast_busy,dij_busy,bfs_busy}),
+        .done({dfs_done,ast_done,dij_done,bfs_done}),
+        .found({dfs_found,ast_found,dij_found,bfs_found}),
+        .no_path({dfs_no_path,ast_no_path,dij_no_path,bfs_no_path}),
+        .snap_mask(snap_mask),.snap_status(snap_status),.snap_place(snap_place),
+        .cyc_bcd(cyc_bcd),.exp_bcd(exp_bcd),.cost_bcd(cost_bcd)
+    );
     wire clk6p25m;
     wire [12:0] oled_pixel_index;
     wire [15:0] oled_pixel_data;
@@ -240,10 +256,8 @@ module arena_top #(
     end
     oled_dashboard u_oled_dashboard (
         .pixel_index(oled_pixel_index),
-        .bfs_cycles(bfs_cycles_snap),.bfs_expansions(bfs_exp_snap),.bfs_cells(bfs_cells_snap),.bfs_cost(bfs_cost_snap),
-        .dij_cycles(dij_cycles_snap),.dij_expansions(dij_exp_snap),.dij_cells(dij_cells_snap),.dij_cost(dij_cost_snap),
-        .ast_cycles(ast_cycles_snap),.ast_expansions(ast_exp_snap),.ast_cells(ast_cells_snap),.ast_cost(ast_cost_snap),
-        .bfs_status(bfs_status_snap),.dij_status(dij_status_snap),.ast_status(ast_status_snap),
+        .snap_mask(snap_mask),.snap_status(snap_status),.snap_place(snap_place),
+        .cyc_bcd(cyc_bcd),.exp_bcd(exp_bcd),.cost_bcd(cost_bcd),
         .pixel_data(oled_pixel_data)
     );
     Oled_Display u_oled (
@@ -253,12 +267,13 @@ module arena_top #(
         .resn(oled_resn),.vccen(oled_vccen),.pmoden(oled_pmoden)
     );
 
-    // LEDs summarize each solver; unused 7-segment display is dark (active-low).
-    assign led[2:0] = {bfs_found,bfs_done,bfs_busy};
-    assign led[5:3] = {dij_found,dij_done,dij_busy};
-    assign led[8:6] = {ast_found,ast_done,ast_busy};
+    // LEDs summarize each selected solver (off when not in the run);
+    // unused 7-segment display is dark (active-low).
+    assign led[2:0] = {bfs_found,bfs_done,bfs_busy} & {3{run_mask[0]}};
+    assign led[5:3] = {dij_found,dij_done,dij_busy} & {3{run_mask[1]}};
+    assign led[8:6] = {ast_found,ast_done,ast_busy} & {3{run_mask[2]}};
     assign led[11:9] = 3'b000;
-    assign led[14:12] = ast_debug[2:0];
+    assign led[14:12] = {dfs_found,dfs_done,dfs_busy} & {3{run_mask[3]}};   // M2's LEDs: DFS status
     assign led[15] = mode[0];
     assign seg = 7'b1111111;
     assign dp = 1'b1;

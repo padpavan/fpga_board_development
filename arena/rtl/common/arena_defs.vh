@@ -7,7 +7,7 @@
 //
 //   `include "arena_defs.vh"
 //
-// Contract version: 1.5
+// Contract version: 1.6
 //////////////////////////////////////////////////////////////////////////////
 `ifndef ARENA_DEFS_VH
 `define ARENA_DEFS_VH
@@ -47,6 +47,7 @@
 `define ARENA_ENG_BFS       2'd0
 `define ARENA_ENG_DIJ       2'd1
 `define ARENA_ENG_AST       2'd2
+`define ARENA_ENG_DFS       2'd3
 
 // ------------------------------------------------------- display sizes ---
 `define ARENA_VGA_H         1920

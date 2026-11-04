@@ -3,8 +3,11 @@
 // 1920x1080 renderer on clk_pix (148.5 MHz).
 //
 // EDIT: one grid of square cells, full height, centred; help text in the left margin.
-// RUN : 2x2 quadrants (BFS, Dijkstra, A*, legend).  The three algorithm quadrants
-//       share one zoom/pan view (run_k, run_ox, run_oy from vga_zoom).
+// RUN : 2x2 quadrants (BFS, Dijkstra, A*, DFS).  All four quadrants share one
+//       zoom/pan view (run_k, run_ox, run_oy from vga_zoom).  A quadrant whose
+//       engine is not in run_mask shows only the maze, with a grey header.
+//       The legend is a half-size text strip in the DFS quadrant's right
+//       margin (outside the grid at 1x; drawn over it when zoomed).
 //
 // Each pixel's grid position comes from a DDA instead of a divide: wx += k per
 // pixel, wy += k per line, where k is cells per pixel in FRAC-bit fixed point.
@@ -36,7 +39,8 @@ module vga_render #(
     input  wire [1:0] edit_tool,
     input  wire [INDEX_W-1:0] start_idx, input wire [INDEX_W-1:0] goal_idx,
     input  wire [INDEX_W-1:0] bfs_current, input wire [INDEX_W-1:0] dij_current,
-    input  wire [INDEX_W-1:0] ast_current,
+    input  wire [INDEX_W-1:0] ast_current, input wire [INDEX_W-1:0] dfs_current,
+    input  wire [3:0] run_mask,           // {dfs, ast, dij, bfs}
     // maze_ram VGA ports (async): this cell and its four neighbours
     output reg  [INDEX_W-1:0] cell_addr, output reg [INDEX_W-1:0] up_addr,
     output reg  [INDEX_W-1:0] dn_addr,   output reg [INDEX_W-1:0] lf_addr,
@@ -46,6 +50,7 @@ module vga_render #(
     input  wire [COST_W-1:0] rt_cost,
     // engine cell_state at cell_addr (async)
     input  wire [1:0] bfs_state, input wire [1:0] dij_state, input wire [1:0] ast_state,
+    input  wire [1:0] dfs_state,
     output reg  [3:0] red, output reg [3:0] green, output reg [3:0] blue,
     output reg  hsync, output reg vsync
 );
@@ -59,6 +64,9 @@ module vga_render #(
     localparam signed [OW-1:0] EDIT_OX = -(EDIT_X0*EDIT_K);
     localparam signed [OW-1:0] EDIT_OY = -(EDIT_Y0*EDIT_K);
     localparam CW = OW - FRAC;            // width of the signed cell number
+    // legend: 16x16 px characters (glyph x2), 7 columns, right edge of the DFS quadrant
+    localparam LEG_COLS = 7;
+    localparam LEG_X0   = QUAD_W - 16*LEG_COLS;                                  // 848
 
     // Shapes, in 1/128ths of a cell (fx, fy below)
     localparam [6:0] BAND = 13;           // Pac-Man wall / border thickness, ~0.1 cell
@@ -68,7 +76,7 @@ module vga_render #(
     localparam [11:0] C_BLACK=12'h000, C_WHITE=12'hFFF, C_GRIDLINE=12'h112, C_SEP=12'h444,
                       C_LEGEND_BG=12'h111, C_START=12'hF0F, C_GOAL=12'hF00, C_HOVER=12'hFF0,
                       C_WALL=12'h556, C_VISITED=12'h25C, C_FRONTIER=12'hFC0, C_WEIGHT=12'h951,
-                      C_BFS=12'h0FF, C_DIJ=12'hFF0, C_AST=12'h0F0,
+                      C_BFS=12'h0FF, C_DIJ=12'hFF0, C_AST=12'h0F0, C_DFS=12'hF6A, C_OFF=12'h666,
                       P_WALL=12'h24F, P_FLOOR=12'h000, P_WALL_IN=12'h001, P_PELLET=12'hFCA,
                       P_FRONT=12'h666, P_VISITED=12'h003, P_WEIGHT=12'h404, P_PAC=12'hFF0,
                       P_GHOST=12'hF00, P_HOVER=12'h440, P_SWATCH_VIS=12'h006;
@@ -147,23 +155,24 @@ module vga_render #(
         T_BFS      = {"BFS",                 {21{8'h20}}},
         T_DIJ      = {"DIJKSTRA",            {16{8'h20}}},
         T_AST      = {"A*",                  {22{8'h20}}},
-        T_LEGEND   = {" LEGEND",             {17{8'h20}}},
-        T_WALL     = {" # WALL",             {17{8'h20}}},
-        T_VISITED  = {" # VISITED",          {14{8'h20}}},
-        T_FRONTIER = {" # FRONTIER",         {13{8'h20}}},
-        T_PATH     = {" # PATH",             {17{8'h20}}},
-        T_WEIGHT   = {" # WEIGHT",           {15{8'h20}}},
-        T_ZOOM     = {" ZOOM X",             {17{8'h20}}},
-        T_WHEEL    = {" WHEEL ZOOM",         {13{8'h20}}},
-        T_MIDDLE   = {" MIDDLE RESET ZOOM",  {6{8'h20}}},
-        T_SW_PAC   = {" SW2 PAC-MAN",        {12{8'h20}}},
-        T_SW_CLS   = {" SW2 CLASSIC",        {12{8'h20}}},
+        T_DFS      = {"DFS",                 {21{8'h20}}},
+        T_LEGEND   = {"LEGEND",              {18{8'h20}}},
+        T_WALL     = {"# WALL",              {18{8'h20}}},
+        T_VISITED  = {"# VISIT",             {17{8'h20}}},
+        T_FRONTIER = {"# FRONT",             {17{8'h20}}},
+        T_PATH     = {"# PATH",              {18{8'h20}}},
+        T_WEIGHT   = {"# WGHT",              {18{8'h20}}},
+        T_ZOOM     = {"ZOOM X",              {18{8'h20}}},
+        T_WHEEL    = {"WHEEL",               {19{8'h20}}},
+        T_ZOOMS    = {"ZOOMS",               {19{8'h20}}},
+        T_MIDDLE   = {"MIDDLE",              {18{8'h20}}},
+        T_RESET    = {"RESETS",              {18{8'h20}}},
         T_EDIT     = {"EDIT",                {20{8'h20}}},
         T_TWALL    = {"WALL",                {20{8'h20}}},
         T_TSTART   = {"START",               {19{8'h20}}},
         T_TGOAL    = {"GOAL",                {20{8'h20}}},
         T_TWEIGHT  = {"WEIGHT",              {18{8'h20}}},
-        T_SW2      = {"SW2",                 {21{8'h20}}},
+        T_SW6      = {"SW6",                 {21{8'h20}}},
         T_PAC      = {"PAC-MAN",             {17{8'h20}}},
         T_CLS      = {"CLASSIC",             {17{8'h20}}},
         T_NONE     = {SL{8'h20}};
@@ -183,13 +192,20 @@ module vga_render #(
 
     wire right  = (x >= QUAD_W);
     wire bottom = (y >= QUAD_H);
-    wire [1:0]  panel = edit_mode ? 2'd0 : {bottom, right};   // 0 BFS, 1 DIJ, 2 A*, 3 legend
+    wire [1:0]  panel = edit_mode ? 2'd0 : {bottom, right};   // 0 BFS, 1 DIJ, 2 A*, 3 DFS
     wire [11:0] lx = (!edit_mode && right)  ? x - QUAD_W : x;
     wire [10:0] ly = (!edit_mode && bottom) ? y - QUAD_H : y;
-    wire [5:0]  t_line = ly[10:5];
-    wire [6:0]  t_char = lx[11:5];
+    wire        legend = !edit_mode && (panel == 2'd3) && (lx >= LEG_X0);
+    wire [11:0] lgx = lx - LEG_X0;
+    // 32 px text grid (glyph x4), or 16 px in the legend (glyph x2)
+    wire [5:0]  t_line = legend ? ly[9:4]   : ly[10:5];
+    wire [6:0]  t_char = legend ? lgx[10:4] : lx[11:5];
+    wire [2:0]  g_col  = legend ? lgx[3:1]  : lx[4:2];
+    wire [2:0]  g_row  = legend ? ly[3:1]   : ly[4:2];
     wire [INDEX_W-1:0] view_current = (panel == 2'd0) ? bfs_current :
-                                      (panel == 2'd1) ? dij_current : ast_current;
+                                      (panel == 2'd1) ? dij_current :
+                                      (panel == 2'd2) ? ast_current : dfs_current;
+    wire view_on = run_mask[panel];
     wire sep = !edit_mode && ((x == QUAD_W-1) || (x == QUAD_W) || (y == QUAD_H-1) || (y == QUAD_H));
 
     wire [11:0] dxm = (x > mouse_x) ? x - mouse_x : mouse_x - x;
@@ -198,10 +214,10 @@ module vga_render #(
 
     // text region: 0 none, 1 EDIT margin, 2 quadrant header, 3 legend
     wire [1:0] t_region = edit_mode ? ((x < EDIT_X0) ? 2'd1 : 2'd0) :
-                          (panel != 2'd3) ? ((t_line == 6'd0) ? 2'd2 : 2'd0) : 2'd3;
+                          legend ? 2'd3 : (t_line == 6'd0) ? 2'd2 : 2'd0;
 
     reg               s1_active, s1_hs, s1_vs, s1_edit, s1_pac, s1_in_grid, s1_border, s1_grid;
-    reg               s1_sep, s1_cross, s1_start, s1_goal, s1_cur, s1_hover;
+    reg               s1_sep, s1_cross, s1_start, s1_goal, s1_cur, s1_hover, s1_on;
     reg [1:0]         s1_panel, s1_tregion;
     reg [6:0]         s1_fx, s1_fy, s1_tchar;
     reg [5:0]         s1_tline;
@@ -225,9 +241,10 @@ module vga_render #(
         s1_start <= in_grid && (idx == start_idx);
         s1_goal  <= in_grid && (idx == goal_idx);
         s1_cur   <= in_grid && (idx == view_current);
+        s1_on    <= view_on;
         s1_hover <= in_grid && edit_mode && cursor_valid && (idx == cursor_idx);
         s1_tline <= t_line; s1_tchar <= t_char; s1_tregion <= t_region;
-        s1_gcol <= lx[4:2]; s1_grow <= ly[4:2];
+        s1_gcol <= g_col; s1_grow <= g_row;
         cell_addr <= in_grid ? idx : NONE;
         up_addr   <= (in_grid && row_i > 0)        ? idx - COLS : NONE;
         dn_addr   <= (in_grid && row_i < ROWS-1)   ? idx + COLS : NONE;
@@ -248,36 +265,41 @@ module vga_render #(
                 6'd1: t_str = T_EDIT;
                 6'd2: t_str = (edit_tool == 2'b00) ? T_TWALL : (edit_tool == 2'b01) ? T_TSTART :
                               (edit_tool == 2'b10) ? T_TGOAL : T_TWEIGHT;
-                6'd4: t_str = T_SW2;
+                6'd4: t_str = T_SW6;
                 6'd5: t_str = s1_pac ? T_PAC : T_CLS;
                 default: t_str = T_NONE;
             endcase
             2'd2: begin
-                t_str  = (s1_panel == 2'd0) ? T_BFS : (s1_panel == 2'd1) ? T_DIJ : T_AST;
-                t_kind = {1'b0, s1_panel} + 3'd1;
+                t_str  = (s1_panel == 2'd0) ? T_BFS : (s1_panel == 2'd1) ? T_DIJ :
+                         (s1_panel == 2'd2) ? T_AST : T_DFS;
+                t_kind = s1_on ? {1'b0, s1_panel} + 3'd1 : 3'd5;   // 5 = grey (not selected)
             end
-            2'd3: case (s1_tline)
-                6'd1:  t_str = T_LEGEND;
-                6'd3:  begin t_str = T_WALL;     t_swatch = 3'd0; end
-                6'd4:  begin t_str = T_VISITED;  t_swatch = 3'd1; end
-                6'd5:  begin t_str = T_FRONTIER; t_swatch = 3'd2; end
-                6'd6:  begin t_str = T_PATH;     t_swatch = 3'd3; end
-                6'd7:  begin t_str = T_WEIGHT;   t_swatch = 3'd4; end
-                6'd9:  t_str = T_ZOOM;
-                6'd11: t_str = T_WHEEL;
-                6'd12: t_str = T_MIDDLE;
-                6'd14: t_str = s1_pac ? T_SW_PAC : T_SW_CLS;
+            2'd3: case (s1_tline)                // 16 px lines
+                6'd2:  t_str = T_LEGEND;
+                6'd4:  begin t_str = T_WALL;     t_swatch = 3'd0; end
+                6'd5:  begin t_str = T_VISITED;  t_swatch = 3'd1; end
+                6'd6:  begin t_str = T_FRONTIER; t_swatch = 3'd2; end
+                6'd7:  begin t_str = T_PATH;     t_swatch = 3'd3; end
+                6'd8:  begin t_str = T_WEIGHT;   t_swatch = 3'd4; end
+                6'd10: t_str = T_ZOOM;
+                6'd12: t_str = T_WHEEL;
+                6'd13: t_str = T_ZOOMS;
+                6'd15: t_str = T_MIDDLE;
+                6'd16: t_str = T_RESET;
+                6'd18: t_str = T_SW6;
+                6'd19: t_str = s1_pac ? T_PAC : T_CLS;
                 default: t_str = T_NONE;
             endcase
             default: t_str = T_NONE;
         endcase
     end
     wire [7:0] t_raw = (s1_tchar < SL) ? t_str[(SL-1-s1_tchar)*8 +: 8] : 8'h20;
-    wire [7:0] t_ch  = (s1_tregion == 2'd3 && s1_tline == 6'd9 && s1_tchar == 7'd7) ?
+    wire [7:0] t_ch  = (s1_tregion == 2'd3 && s1_tline == 6'd10 && s1_tchar == 7'd6) ?
                        (8'd49 + zoom_level) : t_raw;     // zoom digit '1'..'8'
 
     reg               s2_active, s2_hs, s2_vs, s2_edit, s2_pac, s2_in_grid, s2_border, s2_grid;
     reg               s2_sep, s2_cross, s2_start, s2_goal, s2_cur, s2_hover, s2_header_box;
+    reg               s2_on, s2_legend;
     reg               s2_wall, s2_band, s2_mouth, s2_gbody_low;
     reg [1:0]         s2_panel, s2_state;
     reg [COST_W-1:0]  s2_cost;
@@ -290,7 +312,8 @@ module vga_render #(
         s2_edit <= s1_edit; s2_pac <= s1_pac; s2_panel <= s1_panel;
         s2_in_grid <= s1_in_grid; s2_border <= s1_border; s2_grid <= s1_grid;
         s2_sep <= s1_sep; s2_cross <= s1_cross; s2_start <= s1_start; s2_goal <= s1_goal;
-        s2_cur <= s1_cur; s2_hover <= s1_hover;
+        s2_cur <= s1_cur; s2_hover <= s1_hover; s2_on <= s1_on;
+        s2_legend <= (s1_tregion == 2'd3);
         s2_ch <= t_ch; s2_gcol <= s1_gcol; s2_grow <= s1_grow;
         s2_kind <= t_kind; s2_swatch <= t_swatch;
         s2_header_box <= (s1_tregion == 2'd2) && (t_ch != 8'h20);
@@ -300,7 +323,8 @@ module vga_render #(
                     ((rt_cost != `ARENA_COST_WALL) && (s1_fx >= 128-BAND)) ||
                     ((up_cost != `ARENA_COST_WALL) && (s1_fy < BAND)) ||
                     ((dn_cost != `ARENA_COST_WALL) && (s1_fy >= 128-BAND));
-        s2_state <= (s1_panel == 2'd0) ? bfs_state : (s1_panel == 2'd1) ? dij_state : ast_state;
+        s2_state <= (s1_panel == 2'd0) ? bfs_state : (s1_panel == 2'd1) ? dij_state :
+                    (s1_panel == 2'd2) ? ast_state : dfs_state;
         // squares only here; the sums are formed in S3
         s2_dx2 <= s1_adx * s1_adx;   s2_dy2 <= s1_ady * s1_ady;
         s2_exl2 <= s1_aexl * s1_aexl; s2_exr2 <= s1_aexr * s1_aexr; s2_ey2 <= s1_aey * s1_aey;
@@ -317,7 +341,7 @@ module vga_render #(
     wire on_path  = (s2_state == `ARENA_CS_PATH);
     wire on_vis   = (s2_state == `ARENA_CS_VISITED);
     wire on_front = (s2_state == `ARENA_CS_FRONTIER);
-    wire run      = !s2_edit;
+    wire run      = !s2_edit && s2_on;     // search overlay only for selected engines
     wire [14:0] s2_d0 = s2_dx2 + s2_dy2;
     wire [14:0] s2_dl = s2_exl2 + s2_ey2;
     wire [14:0] s2_dr = s2_exr2 + s2_ey2;
@@ -328,7 +352,8 @@ module vga_render #(
     wire [4:0] glyph = font(s2_ch, s2_grow);
     reg [11:0] c_algo, c_cls, c_pac, c_text, c_sw, c;
     always @* begin
-        c_algo = (s2_panel == 2'd0) ? C_BFS : (s2_panel == 2'd1) ? C_DIJ : C_AST;
+        c_algo = (s2_panel == 2'd0) ? C_BFS : (s2_panel == 2'd1) ? C_DIJ :
+                 (s2_panel == 2'd2) ? C_AST : C_DFS;
 
         // classic theme
         if (s2_grid)                     c_cls = C_GRIDLINE;
@@ -356,7 +381,8 @@ module vga_render #(
         else                                           c_pac = P_FLOOR;
 
         c_text = (s2_kind == 3'd1) ? C_BFS : (s2_kind == 3'd2) ? C_DIJ :
-                 (s2_kind == 3'd3) ? C_AST : C_WHITE;
+                 (s2_kind == 3'd3) ? C_AST : (s2_kind == 3'd4) ? C_DFS :
+                 (s2_kind == 3'd5) ? C_OFF : C_WHITE;
         case (s2_swatch)
             3'd0: c_sw = s2_pac ? P_WALL     : C_WALL;
             3'd1: c_sw = s2_pac ? P_SWATCH_VIS : C_VISITED;
@@ -368,7 +394,7 @@ module vga_render #(
         // everything except text: background layers
         if (s2_header_box)                      c = C_BLACK;
         else if (s2_sep)                        c = C_SEP;
-        else if (run && s2_panel == 2'd3)       c = C_LEGEND_BG;
+        else if (s2_legend)                     c = C_LEGEND_BG;
         else if (s2_in_grid)                    c = s2_pac ? c_pac : c_cls;
         else if (s2_pac && s2_border)           c = P_WALL;
         else                                    c = C_BLACK;

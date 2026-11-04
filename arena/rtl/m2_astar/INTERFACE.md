@@ -1,4 +1,4 @@
-# M2 (Karthik): A* / heuristic / profiling notes
+# M2 (Karthik): A* / DFS / heuristic / profiling notes
 
 Owner-editable (Tier 2). Binding rules live in `/CONTRACT.md`.
 
@@ -6,47 +6,13 @@ Owner-editable (Tier 2). Binding rules live in `/CONTRACT.md`.
 - `astar_engine.v` is the **real A\* engine** with the exact CONTRACT §4 port list plus one optional `dbg_state[3:0]` output.
   - The open set is `ast_open_set` (linear scan over all cells).
   - `tb_astar_engine` PASS: every shared maze and start/goal pair, exact cost/cells/expansions vs `ref/`, the path RAM and `cell_state` checked, random `step_en`, restart from DONE, `rst` mid-run.
+- `dfs_engine.v` is the **DFS engine** (CONTRACT v1.5), same port list, no `dbg_` ports. See "DFS engine" below.
 - `tb_m2_crosscheck` PASS against M1's current `dijkstra_engine`: identical `path_cost` on 53 runs. A\* used 1935 expansions in total vs Dijkstra's 3994, and was never worse.
 - Yosys `synth_xilinx -family xc7`: no latches, `check -assert` clean. About 443 logic LUTs, 112 RAM64M (LUTRAM) and 221 FFs for the engine, roughly 4% of the xc7a35t's LUTs.
 - Vivado 2025.2, `m2_test_top` with the master XDC, synth + place + route on xc7a35tcpg236-1: **0 critical warnings, timing met at 100 MHz (WNS +0.309 ns)**. Whole board top: 1241 LUTs (376 as LUTRAM), 505 FFs.
 
 ## Integration: `pathfind_top` (CONTRACT §5)
-M1's `pathfind_top.v` still has the pre-contract ports. Once M1 adds the shared `step_en` and `cell_rd_addr` inputs (CONTRACT §12), add this. It's the agreed cross-folder edit; M2 will open the PR or M1 can paste it.
-
-```verilog
-    // ---- ports: A* group ----
-    output wire                 ast_busy,
-    output wire                 ast_done,
-    output wire                 ast_found,
-    output wire                 ast_no_path,
-    input  wire [INDEX_W-1:0]   ast_path_rd_addr,
-    output wire [INDEX_W-1:0]   ast_path_rd_data,
-    output wire [DIST_W-1:0]    ast_path_cells,
-    output wire [DIST_W-1:0]    ast_path_cost,
-    output wire [INDEX_W-1:0]   ast_current,
-    output wire [1:0]           ast_cell_state,
-    output wire [CNT_W-1:0]     ast_cycles,
-    output wire [DIST_W-1:0]    ast_expansions,
-    output wire [3:0]           ast_dbg_state,     // optional, for led[14:12]
-
-    // ---- instance ----
-    astar_engine #(
-        .COLS(COLS), .ROWS(ROWS), .COST_W(COST_W),
-        .DIST_W(DIST_W), .INDEX_W(INDEX_W), .CNT_W(CNT_W)
-    ) u_astar (
-        .clk(clk), .rst(rst), .step_en(step_en),
-        .load_we(load_we), .load_addr(load_addr), .load_data(load_data),
-        .start(start), .start_idx(start_idx), .goal_idx(goal_idx),
-        .busy(ast_busy), .done(ast_done), .found(ast_found), .no_path(ast_no_path),
-        .path_rd_addr(ast_path_rd_addr), .path_rd_data(ast_path_rd_data),
-        .path_cells(ast_path_cells), .path_cost(ast_path_cost),
-        .current(ast_current), .cell_rd_addr(cell_rd_addr), .cell_state(ast_cell_state),
-        .cycles(ast_cycles), .expansions(ast_expansions),
-        .dbg_state(ast_dbg_state)
-    );
-```
-Once M1's Dijkstra meets CONTRACT §4, re-run the cross-check with no skips:
-`sim/run_m2.sh tb_m2_crosscheck rtl/m1_pathfind/dijkstra_engine.v -DDIJ_CONTRACT_PORTS`
+M1's `pathfind_top` instantiates both M2 engines: `u_astar` (prefix `ast_`, plus `ast_dbg_state`) and `u_dfs` (prefix `dfs_`). `arena_top` drives `led[14:12]` with DFS `{found, done, busy}` (CONTRACT v1.5 §9), so `ast_dbg_state` is left unconnected there.
 
 ## Engine behaviour others may rely on (M3)
 - **`start`** is accepted from IDLE or DONE **even while `step_en = 0`**, so `busy` always rises the cycle after `start`. The search itself only advances on `step_en` cycles.
@@ -61,7 +27,7 @@ Once M1's Dijkstra meets CONTRACT §4, re-run the cross-check with no skips:
   | unreachable | 37356 | 183 |
   | start == goal | 390 | 1 |
 
-  For comparison, M1's current Dijkstra takes 30968 cycles on the weighted maze.
+  For comparison, M1's Dijkstra (indexed min-heap since 2026-11-01) takes 2282 cycles on the open grid 0 → 191, so A\* is now the slowest engine in cycles while still expanding the fewest cells.
 - **`cell_state`** has its own LUTRAM copy, so it's readable at any time with no effect on the search. All cells go to UNSEEN during INIT.
 - **Path RAM:** addr 0 = start ... addr `path_cells-1` = goal, valid while `done && found`.
 - **`current`** = the last cell expanded (`IDX_NONE` from start until the first expansion).
@@ -75,6 +41,40 @@ Once M1's Dijkstra meets CONTRACT §4, re-run the cross-check with no skips:
   | 3 | CHK_G | 9 | FAIL |
   | 4 | SEED | 10 | DONE |
   | 5 | POP | 11 | NB_WR |
+
+## DFS engine (`dfs_engine.v`, CONTRACT v1.5)
+- **Algorithm:** iterative DFS with an explicit stack. The top cell probes one direction per clock in the fixed order up, down, left, right. The first open, unvisited neighbour is pushed and probing restarts at dir 0. A cell with no way forward is popped (a dead end) and its parent is probed again from dir 0, skipping visited cells, so no per-level direction is stored. It stops as soon as the goal is pushed.
+- **The stack is the path.** `u_stack_path` is a second LUTRAM copy of the stack (same writes) read by `path_rd_addr`, so there's no parent RAM and no walk-back. `S_MARK` walks the stack once to set PATH and sum `path_cost`.
+- **States:** IDLE → CLEAR (192) → PUSH_START → PROBE (loop) → MARK (path_cells) → FINISH.
+- **Metrics:**
+  - `expansions` = cells pushed, start and goal included.
+  - `path_cost` = weighted sum of the entered cells (directly comparable with Dijkstra/A\*).
+  - `cycles` = 192 + 1 + probes + path_cells + 1, reproduced exactly by `ref/arena_ref.py dfs()`.
+  - A wall endpoint gives 193 cycles.
+- **`cell_state`:** FRONTIER = on the current branch, VISITED = backtracked dead end, PATH = final path. When done, no FRONTIER cells remain and #VISITED + #PATH == expansions.
+- **`current`** = top of the stack (`IDX_NONE` until the start is pushed).
+- **Typical numbers (open grid 0 → 191):** 688 cycles, 181 expansions, path cost 180, against BFS 1204 cycles / cost 26, Dijkstra 2282 / 26, A\* 5668 / 26. DFS is the cheapest per step but its path snakes through the whole grid. That contrast is the point of the comparison.
+- **Hazards:** writes are registered and gated by `step_en` (same scheme as `bfs_engine`). The only same-slot read-after-write is `start == goal` (S_PUSH_START writes stack[0] and S_MARK reads it next step); `stk_q` forwards it.
+- **Test:** `tb_dfs_engine` checks every shared maze run exactly against `<name>.dfs.expect` (cost, cells, expansions, **cycles**), plus path validity, cell_state census, random `step_en`, restart from done, start while busy, `rst` mid-run and start == goal.
+
+## OLED map simulation (`ast_oled_map4.v` + `tb_ast_oled_map4`, test only)
+- `ast_oled_map4` draws all four engines' maps on one 96×64 OLED frame: 2×2 quadrants (BFS, DIJ / A\*, DFS, the same placement as VGA RUN), each with an 8 px label (`BFS #1`, or `OFF`) and a 16×12 map of 3×2 px cells. The colours are the same as VGA.
+- **Not in `arena_top`:** there, each engine's single `cell_state` read port belongs to VGA, so the real OLED shows the results dashboard instead. On the board it runs in `m2_race_top` (below), where the OLED owns that port.
+- `tb_ast_oled_map4` builds the arena_top chain (`pathfind_top` → `oled_stats` → `oled_dashboard`) plus the map view, runs scenarios and writes frames to `sim/build/`:
+  - `oled_map4_<tag>_mid.hex`: search paused part-way;
+  - `oled_map4_<tag>_done.hex`;
+  - `oled_dash_<tag>_{mid,done}.hex`: the real dashboard.
+- It self-checks the path pixel count per quadrant, start/goal drawing and finish places.
+- **Run (from anywhere, needs Vivado, no Icarus):**
+  ```
+  arena/sim/run_xsim.sh tb_ast_oled_map4                    # 4 default scenarios
+  arena/sim/run_xsim.sh tb_ast_oled_map4 maze=rand5 start=14 goal=183 mask=f mid=800
+  python3 arena/ref/oled_frames_to_png.py                   # -> sim/build/*.png
+  ```
+  - `mask` is hex: 1 = BFS, 2 = DIJ, 4 = A\*, 8 = DFS.
+  - `mid` = cycles after start for the mid-run frame.
+  - Any maze in `sim/mazes/` works.
+- `sim/run_xsim.sh <tb> [plusargs]` runs any testbench in xsim. It works in a scratch folder under `sim/build/` and passes plusargs through an options file, because `cmd.exe` would split `maze=rand5` at the `=`.
 
 ## Reusable modules (anyone may instantiate)
 - `manhattan.v`: combinational, same-cycle (`tb_manhattan` exhaustive PASS). The parameters default to the `arena_defs.vh` macros.
@@ -110,6 +110,14 @@ Once M1's Dijkstra meets CONTRACT §4, re-run the cross-check with no skips:
   - `m2_test_top` has every port the master XDC constrains (73 pins, checked by script). Unused ones are tied off: VGA black, PS/2 released (`z`), OLED powered off and deselected, `btnL/R/D` ignored. So there are no "no ports matched" critical warnings.
 - Controls and expected 7-seg values are in the header of `m2_test_top.v`. The four mazes are identical to `sim/mazes/{open,weighted,unreachable,corridor}.mem`.
 
+### 4-engine OLED race (`m2_race_top.v`, no VGA or mouse needed)
+- Board top for watching the race on the Pmod OLED. `pathfind_top` (all four engines) + `ast_oled_map4` on the OLED (`sw[7]=1`: the `oled_stats`/`oled_dashboard` screen instead). The OLED owns `pathfind_top.cell_rd_addr`.
+- Mazes: the 4 built-in ones on `sw[1:0]` (`ast_test_maze`), or random ones (`sw[6]=1`, `btnL` = new maze, M3's `maze_gen`, start 0 → goal 191). Two LUTRAM copies of the stored maze: one feeds the registered load bus, one the OLED.
+- `sw[5:2]` engines, `btnC` race, `sw[12]` pause, `sw[15:13]` speed (step every 2^(speed+12) clocks; 7 ≈ 190 steps/s). 7-seg = finish places, digits DFS A\* DIJ BFS left to right. Full controls in the file header.
+- After a maze change the map shows the clean new maze (selected engines labelled `#-`) until the next race.
+- Vivado sources (top = `m2_race_top`, include dir `rtl/common`, master XDC): `common/{Oled_Display,clk_div,debounce_btn,grid_mem}.v`; `m1_pathfind/{pathfind_top,bfs_engine,dijkstra_engine,dij_min_heap}.v`; `m2_astar/{m2_race_top,astar_engine,dfs_engine,ast_neighbour,ast_open_set,ast_relax,ast_sat_counter,manhattan,ast_absdiff,ast_test_maze,ast_sevenseg_hex,ast_oled_map4}.v`; `m3_io/{maze_gen,oled_stats,oled_dashboard}.v`. No VHDL mouse IP.
+- `tb_m2_race_top` PASS: drives the pins; checks LEDs, 7-seg places, engine results vs `.ast.expect`/`.dfs.expect`, OLED path pixels per quadrant, the clean preview, 3 random mazes (engine maze == stored maze, DIJ == A\* cost ≤ DFS cost) and that slow motion + pause gives the same cycles. Frames: `sim/build/oled_race_*.hex`.
+
 ## Profiling definitions
 Owned by M2, published in CONTRACT §4.3 (Tier 1). Change them only through the contract process.
 
@@ -127,9 +135,18 @@ Owned by M2, published in CONTRACT §4.3 (Tier 1). Change them only through the 
 python3 ref/gen_mazes.py                 # regenerate mazes + expected values, self-check
 sim/run_m2.sh tb_<name> [extra .v]       # compile + run one testbench, exit 0 only on PASS
 ```
-`tb_ast_absdiff`, `tb_manhattan`, `tb_ast_sat_counter`, `tb_ast_neighbour`, `tb_ast_relax`, `tb_ast_open_set`, `tb_astar_engine`, `tb_ast_test_maze`, `tb_ast_sevenseg_hex`, `tb_ast_oled_view`, `tb_m2_test_top`, and `tb_m2_crosscheck` (with `rtl/m1_pathfind/dijkstra_engine.v`).
+`tb_ast_absdiff`, `tb_manhattan`, `tb_ast_sat_counter`, `tb_ast_neighbour`, `tb_ast_relax`, `tb_ast_open_set`, `tb_astar_engine`, `tb_dfs_engine`, `tb_ast_test_maze`, `tb_ast_sevenseg_hex`, `tb_ast_oled_view`, `tb_m2_test_top`, `tb_ast_oled_map4`, `tb_m2_race_top`, and `tb_m2_crosscheck` (with `rtl/m1_pathfind/dijkstra_engine.v`).
 
 ## Decisions log
+- 2026-11-02: A* `nb_v`/`nb_valid` are now registered one cycle early, from the next `cur`/`dir`. This takes the neighbour adder out of the `dir → LUTRAM reads → relax → nb_imp_r` path, which had failed by 0.035 ns in the `m2_race_top` build (+0.055 ns in `arena_top`). Cycle counts are unchanged; all A* tests pass exactly.
+- 2026-11-02: Added `m2_race_top`, a board test top that shows the 4-engine race on the OLED (`ast_oled_map4`) for testing without a VGA monitor. The 100 MHz engine outputs are read directly by the 6.25 MHz OLED logic (same test shortcut as `m2_test_top`: worst case one wrong pixel for one frame).
+- 2026-11-02: Engine selection and finish order (CONTRACT v1.5, by M2):
+  - `pathfind_top` takes `run_mask` and gates `start` per engine.
+  - `sys_ctrl` latches `sw[5:2]` on BTNC.
+  - The new `oled_stats` (M3 folder) snapshots, ranks finish order by `cycles` and converts to BCD. `oled_dashboard` was rewritten to show `#place`, decimal cycles/expansions/cost and the status word.
+  - Added the `ast_oled_map4` simulation view and `run_xsim.sh`.
+- 2026-11-02: The DFS mark phase reads path costs through its own cost-RAM copy (`u_cost_mark`). A shared, muxed cost read made `sp → stack → cost → can_push → sp` a -1.75 ns static timing path, even though PROBE never uses the MARK input.
+- 2026-11-02: Added `dfs_engine` as a fourth engine (CONTRACT v1.5, Tier-1 change made by M2 per §0). Fixed U/D/L/R neighbour order (classic blind DFS, not goal-directed). The stack doubles as the path RAM. `path_cost` is weighted so the OLED compares path quality against Dijkstra/A\*. Wired through M1's `pathfind_top` and M3's `arena_top`, `sys_ctrl` (4-bit `engines_done`), `vga_render` (bottom-right quadrant = DFS, legend removed, pink path (15,6,10)) and `oled_dashboard` (lines 6-7, RGB565 `FB35`). `led[14:12]` now shows DFS status instead of `ast_dbg_state`.
 - 2026-10-22: Reference model in `arena/ref/` (`arena_ref.py`, `gen_mazes.py`). The shared `.expect` format is unchanged; A*-exact values (cells, expansions) go in a separate `<name>.ast.expect`.
 - 2026-10-22: Open set = a linear scan over all cells.
 - 2026-10-22: A* tie-break = lowest f, then highest g, then lowest index. Closed nodes are never reopened (Manhattan is consistent since every cost >= 1).
