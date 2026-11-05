@@ -7,7 +7,7 @@
 //
 //   `include "arena_defs.vh"
 //
-// Contract version: 1.7
+// Contract version: 1.8
 //////////////////////////////////////////////////////////////////////////////
 `ifndef ARENA_DEFS_VH
 `define ARENA_DEFS_VH
@@ -54,5 +54,10 @@
 `define ARENA_VGA_V         1080
 `define ARENA_OLED_W        96
 `define ARENA_OLED_H        64
+
+// -------------------------------------- performance graph (CONTRACT 8a) ---
+`define ARENA_GV_ADDR_W     9     // history sample index: 512 samples per engine
+`define ARENA_GV_DATA_W     8     // sample value: 0..255 = 0..100 % of the y axis
+`define ARENA_GV_PLOG_W     5     // log2(cycles per sample)
 
 `endif

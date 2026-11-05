@@ -10,6 +10,20 @@ Owner-editable (Tier 2). Record internal decisions other members might want to k
 - Each engine keeps a **private copy** of the maze (its own `grid_mem` cost RAM loaded over the load bus), so there's no memory arbitration between engines.
 - Memories are LUTRAM (`common/grid_mem`, async read).
 
+## Performance graph screen (CONTRACT §8a, v1.8)
+- Shown on the VGA when `sw[9]` and `sw[10]` are both on (demo mode). M2's `ast_perf_sampler` measures; M1 stores and plots.
+- `gv_hist_ram`: one per engine, 512 × 8-bit dual-clock block RAM (write on `clk` from the sampler, read on `clk_pix`), read latency 2 with an output register. It is also the clock crossing for the samples.
+- `gv_graph`: the 1920×1080 screen, latency 4 `clk_pix` cycles like `vga_render`, so `arena_top` just switches between the two pictures once per frame.
+  - Layout:
+    - plot 1536×768 at (192, 160): 3 px per sample, 3 px per level
+    - y labels 0–100 % on the left, with grid lines every 25 % and a vertical grid line every 64 samples
+    - title on text row 1, legend on row 3, x caption on row 30, switch help on row 32 (32 px text rows, 5×7 font ×4)
+  - The sample and level under the beam come from counters stepped with the pixel counters (`sidx/ssub`, `lvl/lsub`): no divides at 148.5 MHz.
+  - Curves are step lines: a horizontal run at the sample's level, plus a 2 px vertical from the previous sample's level in the sample's first two columns. Each engine's previous sample is kept in a register (`prev0..3`).
+  - Colours match `vga_render` (BFS cyan, Dijkstra yellow, A* green, DFS pink); A* is drawn on top. Unselected engines aren't drawn and show grey in the legend. A white 9×9 marker shows where each engine finished (`hist_end`).
+  - The caption shows the cycles per sample (`2^hist_plog`, 1 … 1048576), or `NO DATA YET` while `hist_count` = 0.
+- Bench: `tb_gv_graph` checks 21 pixels: curves, step verticals, masking, `hist_count` cut-off, marker, grid, axis, title, legend, y label, caption, `NO DATA YET`, metric title, and hsync alignment.
+
 ## Contract §12 M1 items
 - [x] Accept `start` from DONE (no `rst` needed between runs).
 - [x] `step_en` freezes FSM, memories, `current`, `cell_state` and counters.
@@ -29,6 +43,7 @@ Owner-editable (Tier 2). Record internal decisions other members might want to k
 - Post-synthesis (`pathfind_top`, out of context, 100 MHz): worst slack into `u_dijkstra` +0.65 ns, into `u_bfs` +0.40 ns. Dijkstra + heap ≈ 860 LUTs (400 as LUTRAM).
 
 ## Decisions log
+- 2026-11-05 (CONTRACT v1.8): added the performance graph screen (`gv_graph`, `gv_hist_ram`). Samples cross clocks inside the dual-clock BRAM, and the frame-stable values (`hist_count`, `hist_plog`, `hist_metric`, `hist_end*`) through a second `vga_cdc` in `arena_top`. M2's `ast_perf_sampler` was committed as a stub with the agreed ports, so the screen shows `NO DATA YET` until M2 fills it in.
 - 2026-11-02 (made by M2, CONTRACT v1.6): `pathfind_top` instantiates a fourth engine, `u_dfs` (M2's `dfs_engine`, prefix `dfs_`). New shared input `run_mask[3:0]` (`{dfs, ast, dij, bfs}`): engine *i* gets `start && run_mask[i]`, so unselected engines never start. `tb_pathfind` checks DFS on every shared maze against `<name>.dfs.expect` and adds a run_mask scenario.
 - 2026-11-04: `dij_min_heap` registers its `pos[]` write by one cycle and forwards a pending write to the `pos` read. In the integrated `arena_top` (with the 1080p VGA) the sift compare → `w_idx` → LUTRAM write-enable path failed 100 MHz by up to 0.30 ns. Heap behaviour, Dijkstra cycles and expansions are unchanged; `tb_dij_min_heap`, `tb_dijkstra`, `tb_pathfind` and `tb_m2_crosscheck` PASS.
 - 2026-11-01: Dijkstra's linear scan replaced by `dij_min_heap` (indexed binary heap with decrease-key). The engine treats a relax on an unsettled cell with a finite distance as decrease-key, anything else as insert, so `pos[]` never needs clearing. Heap memory writes are combinational (land on the same edge as the FSM step), so a sift never reads a pending write. The sift-up parent position is precomputed in a register to keep the read → compare → write path short (slack 0.16 → 0.65 ns). Paths, costs and expansions semantics unchanged; `u_dist_scan` / `u_visited_scan` removed.
