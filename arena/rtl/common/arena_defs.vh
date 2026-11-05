@@ -7,7 +7,7 @@
 //
 //   `include "arena_defs.vh"
 //
-// Contract version: 1.8
+// Contract version: 1.9
 //////////////////////////////////////////////////////////////////////////////
 `ifndef ARENA_DEFS_VH
 `define ARENA_DEFS_VH
@@ -55,9 +55,12 @@
 `define ARENA_OLED_W        96
 `define ARENA_OLED_H        64
 
-// -------------------------------------- performance graph (CONTRACT 8a) ---
-`define ARENA_GV_ADDR_W     9     // history sample index: 512 samples per engine
-`define ARENA_GV_DATA_W     8     // sample value: 0..255 = 0..100 % of the y axis
-`define ARENA_GV_PLOG_W     5     // log2(cycles per sample)
+// ------------------------------ performance graph on the OLED (CONTRACT 8a) ---
+`define ARENA_PG_ADDR_W     7     // history RAM address: 128 words
+`define ARENA_PG_ROT_W      3     // address rotation 0..ADDR_W-1
+`define ARENA_PG_SAMPLES    94    // samples shown (1 px each); halved when full; must be even
+`define ARENA_PG_LEVEL_W    6     // one engine's plot level
+`define ARENA_PG_LEVEL_MAX  46    // levels 0..46 = 0..100 % (47 px tall)
+`define ARENA_PG_BEST_W     5     // closest Manhattan distance so far (max 26, all-ones = none yet)
 
 `endif

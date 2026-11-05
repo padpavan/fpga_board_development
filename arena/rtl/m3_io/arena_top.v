@@ -14,8 +14,6 @@
 //         VGA picture as small maps (EDIT map / 4-engine race / game) via
 //         oled_map, which then owns the engines' cell_rd_addr and maze_ram's
 //         first VGA read port (the VGA overlay is wrong meanwhile).
-//   sw[9] + sw[10] (demo mode): the VGA shows the performance graph screen
-//         (CONTRACT 8a): M2's ast_perf_sampler measures, M1's gv_graph plots.
 module arena_top #(
     parameter DEBOUNCE_LOCKOUT=20_000_000,
     parameter GEN_CELLS=`ARENA_NUM_CELLS,
@@ -289,8 +287,6 @@ module arena_top #(
             v_glevel, v_galgo, v_glives, v_gscore, v_gpellets} = view_p;
 
     wire active_video, hs, vs;
-    wire [3:0] vr_r, vr_g, vr_b, gv_r, gv_g, gv_b;      // maze picture / graph screen
-    wire vr_hs, vr_vs, gv_hs, gv_vs;
     wire [11:0] px;
     wire [10:0] py;
     vga_timing u_vga_timing (.clk(clk_pix),.rst(rst_pix),.active_video(active_video),
@@ -316,59 +312,8 @@ module arena_top #(
         .ghost_pos(v_ghosts),.ghost_present(v_gpresent),.pellet(v_pellet),
         .game_level(v_glevel),.game_algo(v_galgo),.game_lives(v_glives),
         .game_score(v_gscore),.game_pellets(v_gpellets),
-        .red(vr_r),.green(vr_g),.blue(vr_b),.hsync(vr_hs),.vsync(vr_vs)
+        .red(vga_r),.green(vga_g),.blue(vga_b),.hsync(vga_hs),.vsync(vga_vs)
     );
-
-    // ---------------- performance graph screen (CONTRACT 8a) ----------------
-    // M2's sampler measures the demo run (never a GAME search) and writes the
-    // samples straight into gv_graph's dual-clock history RAMs; its other
-    // outputs cross to clk_pix once per frame like the view bundle.
-    localparam GV_AW = `ARENA_GV_ADDR_W, GV_DW = `ARENA_GV_DATA_W, GV_PW = `ARENA_GV_PLOG_W;
-    wire                 gv_we, gv_metric;
-    wire [1:0]           gv_eng;
-    wire [GV_AW-1:0]     gv_addr;
-    wire [GV_DW-1:0]     gv_data;
-    wire [GV_AW:0]       gv_count;
-    wire [GV_PW-1:0]     gv_plog;
-    wire [4*GV_AW-1:0]   gv_end;
-    wire [3:0]           gv_end_valid;
-    ast_perf_sampler u_perf (
-        .clk(clk),.rst(rst),.step_en(step_en),.start(start_search && !game_owns),
-        .run_mask(run_mask),.start_idx(start_idx),.goal_idx(goal_idx),
-        .current({dfs_current,ast_current,dij_current,bfs_current}),
-        .expansions({dfs_exp,ast_exp,dij_exp,bfs_exp}),
-        .busy({dfs_busy,ast_busy,dij_busy,bfs_busy}),
-        .done({dfs_done,ast_done,dij_done,bfs_done}),
-        .found({dfs_found,ast_found,dij_found,bfs_found}),
-        .metric_sel(sw_sync[11]),
-        .hist_we(gv_we),.hist_eng(gv_eng),.hist_addr(gv_addr),.hist_data(gv_data),
-        .hist_count(gv_count),.hist_plog(gv_plog),.hist_metric(gv_metric),
-        .hist_end(gv_end),.hist_end_valid(gv_end_valid)
-    );
-    wire graph_sw = sw_sync[9] && sw_sync[10] && !game_go;
-    localparam GVIEW_W = 1 + (GV_AW+1) + GV_PW + 1 + 4*GV_AW + 4;
-    wire [GVIEW_W-1:0] gview_p;
-    vga_cdc #(.W(GVIEW_W)) u_gv_cdc (
-        .clk_a(clk),.rst_a(rst),.din({graph_sw, gv_count, gv_plog, gv_metric, gv_end, gv_end_valid}),
-        .clk_b(clk_pix),.rst_b(rst_pix),.apply_b(view_tick),.dout(gview_p)
-    );
-    wire v_graph, v_gv_metric;
-    wire [GV_AW:0] v_gv_count;
-    wire [GV_PW-1:0] v_gv_plog;
-    wire [4*GV_AW-1:0] v_gv_end;
-    wire [3:0] v_gv_end_valid;
-    assign {v_graph, v_gv_count, v_gv_plog, v_gv_metric, v_gv_end, v_gv_end_valid} = gview_p;
-    gv_graph u_gv_graph (
-        .clk(clk),.hist_we(gv_we),.hist_eng(gv_eng),.hist_addr(gv_addr),.hist_data(gv_data),
-        .clk_pix(clk_pix),.rst(rst_pix),
-        .x(px),.y(py),.active_video(active_video),.hsync_in(hs),.vsync_in(vs),
-        .hist_count(v_gv_count),.hist_plog(v_gv_plog),.hist_metric(v_gv_metric),
-        .hist_end(v_gv_end),.hist_end_valid(v_gv_end_valid),.run_mask(v_run_mask),
-        .red(gv_r),.green(gv_g),.blue(gv_b),.hsync(gv_hs),.vsync(gv_vs)
-    );
-    // both pictures have latency 4 from the same vga_timing; switch once per frame
-    assign {vga_r, vga_g, vga_b, vga_hs, vga_vs} = v_graph ? {gv_r, gv_g, gv_b, gv_hs, gv_vs}
-                                                           : {vr_r, vr_g, vr_b, vr_hs, vr_vs};
 
     // Snapshot + finish order + decimal conversion for the OLED (CONTRACT 8):
     // oled_stats registers everything in the 100 MHz domain; the 6.25 MHz
@@ -419,6 +364,36 @@ module arena_top #(
         oled_rst_meta <= |oled_rst_stretch;
         oled_rst_sync <= oled_rst_meta;
     end
+    // Performance graph (CONTRACT 8a): M2's sampler measures the demo run (never a
+    // GAME search) and ast_perf_hist stores it.  Nothing draws it yet, so Vivado
+    // trims these until M1's renderer connects here: drive pg_rd_idx with the
+    // sample for this OLED column and read pg_rd_level / pg_rd_prev (one level per
+    // engine), pg_count, pg_mask, pg_end, pg_end_valid and pg_plog.  The timing
+    // labels come from oled_stats above (snap_order, cyc_bcd, gap_bcd).
+    localparam PG_AW = `ARENA_PG_ADDR_W, PG_RW = `ARENA_PG_ROT_W, PG_LW = `ARENA_PG_LEVEL_W;
+    wire               pg_we;
+    wire [PG_AW-1:0]   pg_waddr, pg_count;
+    wire [4*PG_LW-1:0] pg_wdata;
+    wire [PG_RW-1:0]   pg_rot;
+    wire [4*PG_AW-1:0] pg_end;
+    wire [3:0]         pg_end_valid, pg_mask;
+    wire [4:0]         pg_plog;
+    ast_perf_sampler u_perf (
+        .clk(clk),.rst(rst),.step_en(step_en),.start(start_search && !game_owns),
+        .run_mask(run_mask),.start_idx(start_idx),.goal_idx(goal_idx),
+        .current({dfs_current,ast_current,dij_current,bfs_current}),
+        .expansions({dfs_exp,ast_exp,dij_exp,bfs_exp}),
+        .done({dfs_done,ast_done,dij_done,bfs_done}),
+        .we(pg_we),.waddr(pg_waddr),.wdata(pg_wdata),.count(pg_count),.rot(pg_rot),
+        .end_idx(pg_end),.end_valid(pg_end_valid),.mask(pg_mask),.plog(pg_plog),
+        .dbg_best()
+    );
+    wire [PG_AW-1:0]   pg_rd_idx = {PG_AW{1'b0}};   // M1: the sample to read
+    wire [4*PG_LW-1:0] pg_rd_level, pg_rd_prev;
+    ast_perf_hist u_perf_hist (
+        .clk(clk),.we(pg_we),.waddr(pg_waddr),.wdata(pg_wdata),.rot(pg_rot),
+        .rd_idx(pg_rd_idx),.rd_level(pg_rd_level),.rd_prev_level(pg_rd_prev)
+    );
     wire [15:0] screen_px, map_px;
     oled_screen u_oled_screen (
         .pixel_index(oled_pixel_index),.view(oled_view),.sel(oled_sel),
