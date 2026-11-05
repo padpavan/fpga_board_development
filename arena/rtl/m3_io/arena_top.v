@@ -365,11 +365,9 @@ module arena_top #(
         oled_rst_sync <= oled_rst_meta;
     end
     // Performance graph (CONTRACT 8a): M2's sampler measures the demo run (never a
-    // GAME search) and ast_perf_hist stores it.  Nothing draws it yet, so Vivado
-    // trims these until M1's renderer connects here: drive pg_rd_idx with the
-    // sample for this OLED column and read pg_rd_level / pg_rd_prev (one level per
-    // engine), pg_count, pg_mask, pg_end, pg_end_valid and pg_plog.  The timing
-    // labels come from oled_stats above (snap_order, cyc_bcd, gap_bcd).
+    // GAME search) and ast_perf_hist stores it; M1's gv_oled_plot draws it on the
+    // OLED results view (below), reading the history through pg_rd_idx.  The
+    // timing labels come from oled_stats above (snap_order, cyc_bcd, gap_bcd).
     localparam PG_AW = `ARENA_PG_ADDR_W, PG_RW = `ARENA_PG_ROT_W, PG_LW = `ARENA_PG_LEVEL_W;
     wire               pg_we;
     wire [PG_AW-1:0]   pg_waddr, pg_count;
@@ -388,7 +386,7 @@ module arena_top #(
         .end_idx(pg_end),.end_valid(pg_end_valid),.mask(pg_mask),.plog(pg_plog),
         .dbg_best()
     );
-    wire [PG_AW-1:0]   pg_rd_idx = {PG_AW{1'b0}};   // M1: the sample to read
+    wire [PG_AW-1:0]   pg_rd_idx;                   // from gv_oled_plot: sample under the pixel
     wire [4*PG_LW-1:0] pg_rd_level, pg_rd_prev;
     ast_perf_hist u_perf_hist (
         .clk(clk),.we(pg_we),.waddr(pg_waddr),.wdata(pg_wdata),.rot(pg_rot),
@@ -411,7 +409,16 @@ module arena_top #(
         .player_pos(g_player),.player_dir(g_dir),.ghost_pos(g_ghosts),.ghost_present(g_ghost_present),
         .pellet(g_pellet),.pixel_data(map_px)
     );
-    assign oled_pixel_data = oled_mirror ? map_px : screen_px;
+    // demo results view (LOAD..DONE): M1's timing header + live performance graph
+    wire [15:0] plot_px;
+    gv_oled_plot u_gv_plot (
+        .pixel_index(oled_pixel_index),.pixel_data(plot_px),
+        .rd_idx(pg_rd_idx),.rd_level(pg_rd_level),.rd_prev_level(pg_rd_prev),
+        .count(pg_count),.mask(pg_mask),.end_idx(pg_end),.end_valid(pg_end_valid),
+        .snap_mask(snap_mask),.snap_status(snap_status),.snap_place(snap_place),
+        .snap_order(snap_order),.cyc_bcd(cyc_bcd),.gap_bcd(gap_bcd)
+    );
+    assign oled_pixel_data = oled_mirror ? map_px : (oled_view == 2'd1) ? plot_px : screen_px;
     Oled_Display u_oled (
         .clk(clk6p25m),.reset(oled_rst_sync),.frame_begin(),.sending_pixels(),.sample_pixel(),
         .pixel_index(oled_pixel_index),.pixel_data(oled_pixel_data),

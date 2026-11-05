@@ -251,7 +251,7 @@ Suggested `sys_ctrl` states: **EDIT** (mouse edits / generator writes `maze_ram`
 
 ## 8a. Performance graph [T1 for the interface and metric, T2 for the screen]
 
-An OLED plot of each engine's progress to the goal against time, on the demo results view. **M2 measures and stores** (`m2_astar/ast_perf_probe`, `ast_perf_sampler`, `ast_perf_hist`). **M1 draws** (renderer in `m1_pathfind/`, added to `arena_top` and `oled_screen` per §0). The results screen stays as it is until the renderer is connected.
+An OLED plot of each engine's progress to the goal against time, on the demo results view. **M2 measures and stores** (`m2_astar/ast_perf_probe`, `ast_perf_sampler`, `ast_perf_hist`). **M1 draws** (`m1_pathfind/gv_oled_plot`, wired in `arena_top` per §0; it replaces `oled_screen`'s results view, which is no longer shown).
 
 **[T1] Metric.** For each selected engine:
 - `best` = the lowest `manhattan(cell, goal)` over the cells the engine has expanded so far. Only expanded cells count, so it never rises.
@@ -294,7 +294,7 @@ An OLED plot of each engine's progress to the goal against time, on the demo res
 3. `start` is the demo start pulse only, never a GAME search.
 4. Inputs: `clk, rst, step_en` (demo), `start, run_mask, start_idx, goal_idx`, and the 4-engine buses `current, expansions, done`. M2 may add inputs with an `arena_top` change.
 
-**[T2: default] Screen** (M1's choice): 2 text lines above a 47 px plot (`y` = 62 − level, `x` = sample + 1, axes at `x` = 0 and `y` = 63). The fastest engine shows its time and the others `+x.xx`, each in its engine's colour (BFS cyan, Dijkstra yellow, A* green, DFS pink; A* on top). A curve stops at its engine's finish. `docs/reference/ast_oled_graph.v.txt` is an untested earlier draft M1 may use or ignore.
+**[T2: default] Screen** (M1's choice, `m1_pathfind/gv_oled_plot`, the whole demo results view): 2 text lines above a 47 px plot (`y` = 62 − level, `x` = sample + 1, axes at `x` = 0 and `y` = 63). The fastest engine shows its time and the others `+x.xx` (µs), `RUN`, `NONE` (no path) or grey `OFF`, each in its engine's colour (BFS cyan, Dijkstra yellow, A* green, DFS pink; A* on top). A curve stops at its engine's finish, with a dotted line in its colour down to the x axis. Dotted grid at 50 % and 100 %; dim axis labels `100%`, `50` and `TIME>` behind the curves. `docs/reference/ast_oled_graph.v.txt` is an untested earlier draft M1 may use or ignore.
 
 ## 9. Top-level ports and pin ownership [T1]
 

@@ -10,8 +10,13 @@ Owner-editable (Tier 2). Record internal decisions other members might want to k
 - Each engine keeps a **private copy** of the maze (its own `grid_mem` cost RAM loaded over the load bus), so there's no memory arbitration between engines.
 - Memories are LUTRAM (`common/grid_mem`, async read).
 
-## Performance graph (CONTRACT §8a, v1.9): to do
-The VGA screen (`gv_graph`, `gv_hist_ram`, `tb_gv_graph`) was removed in v1.9; the code stays in git history at 80ef424. M2's measurement and history are finished and tested, so M1 only has to draw. See CONTRACT §8a for the signals and `m2_astar/INTERFACE.md` ("Performance graph: handoff to M1") for the steps.
+## Performance graph on the OLED (CONTRACT §8a, v1.9)
+M2 measures and stores (`ast_perf_sampler`, `ast_perf_hist`); M1 draws with `gv_oled_plot`. It is the whole demo results view (`oled_view` = 1, LOAD..DONE), so the curves grow live while the VGA shows the race. `arena_top` picks it with `oled_view == 1` (the `sw[8]` mirror still wins); `oled_screen` is unchanged and still draws the EDIT and GAME views.
+- Header, y 0..15: two 5×7 lines, two engines each in `snap_order` (fastest first), in the engine colours. Fastest: name + time in µs from `cyc_bcd` (`DFS 2.45`, `123.4`, or `1234` from 1000 µs). Others: name + gap from `gap_bcd` (`+3.63`, `+13.0`, `+123`, `+1234`). `RUN` while searching, `NONE` for no path, `OFF` in grey when not in the run. The 8-char slots leave no room for a unit; all values are µs.
+- Plot, y 16..62: exactly the §8a geometry (level L at y = 62 − L, sample i at x = i + 1, axes at x = 0 and y = 63), so no scaling. `rd_idx` = x − 1 goes to `ast_perf_hist`; each curve fills from `rd_prev_level` to `rd_level` in its column, stops at `end_idx`, and a dotted line in its colour drops from the finish to the x axis. Priority A* > Dijkstra > BFS > DFS. Dotted grid at 50 % (y 39) and 100 % (y 16).
+- Axis labels: 3×5 font, dim, drawn behind the curves: `100%` top left, `50` under the 50 % line, `TIME>` bottom right.
+- Bench: `tb_gv_oled_plot` runs the real chain (`pathfind_top` → sampler → history → `oled_stats` → `gv_oled_plot`) on a shared maze (all engines, a mid-run pause, BFS + A* only, and `unreachable`). Every plot pixel is checked against a model of the drawing rules, plus axes, grid, labels, header colours and `NONE` spacing. It dumps `sim/build/oled_plot_{mid,all,bfs_ast,nopath}.hex`; `python3 ref/oled_frames_to_png.py` turns them into pictures.
+- Vivado note: fonts use constant slices in a `case` on the row, not a computed part-select. An earlier draft with a muxed label position crashed Vivado 2025.2 synthesis (access violation).
 
 ## Contract §12 M1 items
 - [x] Accept `start` from DONE (no `rst` needed between runs).
@@ -32,6 +37,7 @@ The VGA screen (`gv_graph`, `gv_hist_ram`, `tb_gv_graph`) was removed in v1.9; t
 - Post-synthesis (`pathfind_top`, out of context, 100 MHz): worst slack into `u_dijkstra` +0.65 ns, into `u_bfs` +0.40 ns. Dijkstra + heap ≈ 860 LUTs (400 as LUTRAM).
 
 ## Decisions log
+- 2026-11-05: `gv_oled_plot` draws the §8a graph as the OLED results view, with the timing header from `oled_stats` and axis labels behind the curves. It is wired in `arena_top` (`pg_rd_idx`, an `oled_view == 1` mux), per §0, and `oled_screen` is left unchanged. The labels sit inside the plot so the §8a one-level-per-pixel geometry stays exact.
 - 2026-11-05 (made by M2, CONTRACT v1.9): the graph moved to the OLED, `gv_graph` and `gv_hist_ram` were removed, and M1 now owns only the renderer.
 - 2026-11-05 (CONTRACT v1.8): added the performance graph screen (`gv_graph`, `gv_hist_ram`). Samples cross clocks inside the dual-clock BRAM, and the frame-stable values (`hist_count`, `hist_plog`, `hist_metric`, `hist_end*`) through a second `vga_cdc` in `arena_top`. M2's `ast_perf_sampler` was committed as a stub with the agreed ports, so the screen shows `NO DATA YET` until M2 fills it in.
 - 2026-11-02 (made by M2, CONTRACT v1.6): `pathfind_top` instantiates a fourth engine, `u_dfs` (M2's `dfs_engine`, prefix `dfs_`). New shared input `run_mask[3:0]` (`{dfs, ast, dij, bfs}`): engine *i* gets `start && run_mask[i]`, so unselected engines never start. `tb_pathfind` checks DFS on every shared maze against `<name>.dfs.expect` and adds a run_mask scenario.
