@@ -76,6 +76,35 @@ M1's `pathfind_top` instantiates both M2 engines: `u_astar` (prefix `ast_`, plus
   - Any maze in `sim/mazes/` works.
 - `sim/run_xsim.sh <tb> [plusargs]` runs any testbench in xsim. It works in a scratch folder under `sim/build/` and passes plusargs through an options file, because `cmd.exe` would split `maze=rand5` at the `=`.
 
+## Performance graph (CONTRACT §8a)
+- `ast_perf_probe`: one engine's `best`, the closest it has been to the goal. It has its own `manhattan`, because DFS can move one cell per clock.
+- `ast_perf_sampler`: four probes, the level calculation, the sample tick, auto-scaling and finish markers. `level` is `((d0 - best) * ceil(46 * 512 / d0)) >> 9`, exact for every `d0 <= 26` (checked by `gen_mazes.py` and `tb_ast_perf_sampler`). One multiplier serves the four engines in turn, so a level lags `best` by up to 8 clocks. `done` is delayed 10 clocks so a marker's sample already holds the final level.
+- `ast_perf_hist`: 2 × 128 × 24-bit LUTRAM and the read-side `rotl`.
+- **Auto-scaling:** logical sample `i` lives at `rotl7(i, rot)`. When sample 94 is due, in one clock: `count` 94 -> 47, `plog + 1`, `rot + 1`, and each end index -> `(e + 1) >> 1`. No data moves: kept samples are already at the right address, and new ones land in the slots of the dropped odd ones.
+- `current` is trusted only once `expansions != 0`, because BFS and Dijkstra keep the previous run's `current` until their first expansion. In all four engines the two update on the same edge.
+- **Benches:** `tb_ast_perf_probe`, `tb_ast_perf_hist`, `tb_ast_perf_sampler` (fake engines) and `tb_ast_perf_trace` (real engines on every shared maze against `<name>.perf.expect`). Dijkstra is checked exactly too, because `arena_ref.dijkstra` mirrors `dij_min_heap`.
+
+### Performance graph: handoff to M1
+Everything is already wired in `arena_top` (search for `pg_rd_idx`).
+
+**Fix this first:** the full `arena_top` build already misses timing on `clk_pix_raw`, on the `vga_render` path into `s2_mouth_reg` (figures in the decisions log). Fix it before connecting the renderer, so a later failure can be traced to the renderer. `vga_render` must keep its 4-cycle latency so the picture stays lined up with the syncs: a plain extra pipeline stage on the mouth path would put it a cycle behind unless the rest of the pipeline is matched, so split or precompute the calculation within the existing stages. `vga_render` is an M3 file, so follow CONTRACT §0. `tb_vga_render` and `tb_arena_top` must still pass.
+
+Then, to draw the graph:
+1. Write the renderer in `m1_pathfind/`: `pixel_index` -> plot pixel. Replace the constant `pg_rd_idx` with the sample for the current column, and read:
+   ```verilog
+   // already in arena_top
+   ast_perf_hist u_perf_hist (.clk(clk), .we(pg_we), .waddr(pg_waddr), .wdata(pg_wdata), .rot(pg_rot),
+       .rd_idx(pg_rd_idx), .rd_level(pg_rd_level), .rd_prev_level(pg_rd_prev));
+   // engine e's curve covers this pixel's level lv in column rd_idx when
+   //   rd_idx < pg_count && pg_mask[e] && (!pg_end_valid[e] || rd_idx <= end_of_e)
+   //   && lv >= pg_rd_prev[e*6 +: 6] && lv <= pg_rd_level[e*6 +: 6]
+   ```
+2. Labels from the existing `oled_stats` outputs: first finisher = `snap_order[1:0]`, its time = its `cyc_bcd`, others = their `gap_bcd`. Use `snap_status` for `RUN` and `NO PATH`.
+3. Add the plot to `oled_screen`'s results view (view 1) and connect it in `arena_top`. Both are M3 files, so follow CONTRACT §0.
+4. Add `tb_<renderer>`, and check timing: `sys_clk_pin` slack was only +0.006 ns with default settings at the last full build, and the sampler and history are trimmed from the build until something reads them, so they appear there for the first time when connected. The out-of-context figures are in the decisions log below.
+
+`docs/reference/ast_oled_graph.v.txt` is an untested earlier draft of such a renderer. Use it or ignore it. The measurement is checked against the reference model, so if a curve looks wrong, check the renderer first. Metric or sampler changes are part of the §8a interface: raise them with M2.
+
 ## Reusable modules (anyone may instantiate)
 - `manhattan.v`: combinational, same-cycle (`tb_manhattan` exhaustive PASS). The parameters default to the `arena_defs.vh` macros.
   ```verilog
@@ -135,9 +164,10 @@ Owned by M2, published in CONTRACT §4.3 (Tier 1). Change them only through the 
 python3 ref/gen_mazes.py                 # regenerate mazes + expected values, self-check
 sim/run_m2.sh tb_<name> [extra .v]       # compile + run one testbench, exit 0 only on PASS
 ```
-`tb_ast_absdiff`, `tb_manhattan`, `tb_ast_sat_counter`, `tb_ast_neighbour`, `tb_ast_relax`, `tb_ast_open_set`, `tb_astar_engine`, `tb_dfs_engine`, `tb_ast_test_maze`, `tb_ast_sevenseg_hex`, `tb_ast_oled_view`, `tb_m2_test_top`, `tb_ast_oled_map4`, `tb_m2_race_top`, and `tb_m2_crosscheck` (with `rtl/m1_pathfind/dijkstra_engine.v`).
+`tb_ast_absdiff`, `tb_manhattan`, `tb_ast_sat_counter`, `tb_ast_neighbour`, `tb_ast_relax`, `tb_ast_open_set`, `tb_astar_engine`, `tb_dfs_engine`, `tb_ast_test_maze`, `tb_ast_sevenseg_hex`, `tb_ast_oled_view`, `tb_m2_test_top`, `tb_ast_oled_map4`, `tb_m2_race_top`, and `tb_m2_crosscheck` (with `rtl/m1_pathfind/dijkstra_engine.v`), `tb_ast_perf_probe`, `tb_ast_perf_hist`, `tb_ast_perf_sampler`, `tb_ast_perf_trace` (the last needs M1's and M3's RTL, so use `sim/run_xsim.sh`).
 
 ## Decisions log
+- 2026-11-05 (CONTRACT v1.9): performance graph measurement. M2 owns the history RAM, so the rotated addressing stays hidden from the renderer. M1 draws. The sampler keeps a `function` and `generate` despite the course-level style note below, so `LEVEL_MAX` isn't hard-coded. Sampler + history, out of context, placed and routed at 100 MHz (Vivado 2025.2, registered wrapper around the ports, no `opt_design`): WNS +3.113 ns, 489 LUTs (357 logic, 128 LUTRAM, 4 SRL), 387 FFs including 95 wrapper FFs. In `arena_top` the logic is trimmed until a renderer reads it. Full `arena_top` at this point: `clk_pix_raw` misses timing on the existing `vga_render` path to `s2_mouth_reg` (-0.317 ns with default directives, -0.010 ns with `place_design -directive ExtraTimingOpt`), which this work doesn't touch; the same flow on ac184c6, before the graph, also fails (`sys_clk_pin` -0.159 ns, `clk_pix_raw` -0.076 ns).
 - 2026-11-02: A* `nb_v`/`nb_valid` are now registered one cycle early, from the next `cur`/`dir`. This takes the neighbour adder out of the `dir → LUTRAM reads → relax → nb_imp_r` path, which had failed by 0.035 ns in the `m2_race_top` build (+0.055 ns in `arena_top`). Cycle counts are unchanged; all A* tests pass exactly.
 - 2026-11-02: Added `m2_race_top`, a board test top that shows the 4-engine race on the OLED (`ast_oled_map4`) for testing without a VGA monitor. The 100 MHz engine outputs are read directly by the 6.25 MHz OLED logic (same test shortcut as `m2_test_top`: worst case one wrong pixel for one frame).
 - 2026-11-02: Engine selection and finish order (CONTRACT v1.5, by M2):

@@ -16,6 +16,8 @@ Indices are decimal, and `found` is 0/1. `bfs_cost` = steps; `dij_cost` and `ast
 ## Engine-exact results (M2)
 - `<name>.ast.expect`: `start goal found ast_cost ast_cells ast_expansions`, the exact values `astar_engine` produces.
 - `<name>.dfs.expect`: `start goal found dfs_cost dfs_cells dfs_expansions dfs_cycles`, the exact values `dfs_engine` produces, including cycles. DFS gives *a* path, not a shortest one, so `dfs_cost >= dij_cost`.
+- `<name>.perf.expect`: `start goal engine expansions best level`, the performance graph trace (CONTRACT §8a). One line each time an engine gets closer to the goal: after `expansions` cells it is `best` cells away, which plots at `level`. `engine` is 0 BFS, 1 Dijkstra, 2 A*, 3 DFS. No lines for an engine means it expanded nothing (a wall endpoint).
+- `<name>.perf.total`: `start goal bfs_exp dij_exp ast_exp dfs_exp`, each engine's total expansions, one line per run.
 
 The runs are the same, in the same order, as in `<name>.expect`.
 

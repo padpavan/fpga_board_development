@@ -1,6 +1,6 @@
 # CONTRACT.md: FPGA Pathfinding Arena (Group S1_18)
 
-**Version 1.8** · Basys 3 (xc7a35tcpg236-1) · Verilog-2001
+**Version 1.9** · Basys 3 (xc7a35tcpg236-1) · Verilog-2001
 
 This file is the integration contract for the three members' work. Read it fully **before** writing any project code, whether you're a human or an AI agent. It defines only what crosses a member boundary. Everything inside a member's own block is that member's choice.
 
@@ -62,10 +62,10 @@ arena/                      <- THE integrated project
     Oled_Display.v            course-provided, DO NOT MODIFY
   rtl/m1_pathfind/          <- M1 owns
     bfs_engine.v, dijkstra_engine.v, pathfind_top.v, (queues, heaps, ...)
-    gv_graph.v, gv_hist_ram.v   performance graph screen (§8a)
+    (performance graph renderer, §8a, to be added by M1)
   rtl/m2_astar/             <- M2 owns
     astar_engine.v, dfs_engine.v, manhattan.v, (profiling helpers, ...)
-    ast_perf_sampler.v          performance graph measurement (§8a)
+    ast_perf_probe.v, ast_perf_sampler.v, ast_perf_hist.v   performance graph measurement + history (§8a)
   rtl/m3_io/                <- M3 owns
     arena_top.v, sys_ctrl, maze_ram, maze_gen/lfsr, mouse_if, vga_*, oled_*,
     game_* (GAME mode: game_ctrl, game_board, game_player, game_ghosts, game_targets, game_step)
@@ -89,7 +89,7 @@ arena/                      <- THE integrated project
 | System clock | Port `clk`, 100 MHz, pin W5. **All logic runs on `clk`.** |
 | Slower rates | Use a 1-cycle **clock-enable tick** on `clk`. Do not create new clocks, except the two below. |
 | Exception 1 | `Oled_Display` is clocked by `clk6p25m` from `common/clk_div` (`DIV=16`). Only `Oled_Display` and the logic that generates its `pixel_data` may use that clock. |
-| Exception 2 | VGA runs on `clk_pix`, 148.5 MHz (`ARENA_PIX_CLK_HZ`) from the MMCM in `m3_io/vga_clkgen`, for 1920×1080 @ 60 Hz. Only `vga_timing`, `vga_render`, `gv_graph` (§8a), the read side of `gv_hist_ram` and the pixel side of `vga_cdc` use it. `gv_hist_ram` is a dual-clock block RAM (written on `clk`, read on `clk_pix`); a read of the sample being written can at worst mis-colour one pixel for one frame. 100 MHz values reach it only through `vga_cdc` (toggle handshake, applied once per frame) or as async LUTRAM reads (`maze_ram` VGA ports, engine `cell_state`); a read during a write can at worst mis-colour one pixel for one frame. The XDC declares the two clocks asynchronous. |
+| Exception 2 | VGA runs on `clk_pix`, 148.5 MHz (`ARENA_PIX_CLK_HZ`) from the MMCM in `m3_io/vga_clkgen`, for 1920×1080 @ 60 Hz. Only `vga_timing`, `vga_render` and the pixel side of `vga_cdc` use it. 100 MHz values reach it only through `vga_cdc` (toggle handshake, applied once per frame) or as async LUTRAM reads (`maze_ram` VGA ports, engine `cell_state`); a read during a write can at worst mis-colour one pixel for one frame. The XDC declares the two clocks asynchronous. |
 | Reset | `rst`: **synchronous, active-high**, 1 = reset. Generated in `arena_top` from BTNU (debounced). Every stateful module has a `rst` input. |
 | Button inputs | Always pass through `common/debounce_btn` (2-FF synchroniser + lockout → 1-cycle `press_pulse`). |
 | Switch inputs | Pass through a 2-FF synchroniser before use. |
@@ -244,39 +244,57 @@ Suggested `sys_ctrl` states: **EDIT** (mouse edits / generator writes `maze_ram`
 
 ## 8. Metrics to the OLED [T1 for the signals, T2 for the screen]
 
-- **[T1]** The OLED dashboard shows only the §4.3 signals (`cycles`, `expansions`, `path_cells`, `path_cost`) and status (`busy/done/found/no_path`) of each engine. No other engine data may be required.
-- **[T1]** Clock-domain crossing: the 100 MHz values are copied into a **snapshot register** in the 100 MHz domain (on each engine's `done` rising edge and/or a slow ~10 Hz tick). The 6.25 MHz OLED logic reads **only** the snapshot. Since the values change rarely, a one-frame glitch at worst is acceptable.
+- **[T1]** The OLED dashboard shows only the §4.3 signals (`cycles`, `expansions`, `path_cells`, `path_cost`) and status (`busy/done/found/no_path`) of each engine. No other engine data may be required. **Exception (v1.9):** the performance graph (§8a), whose sampler also reads `current`.
+- **[T1]** Clock-domain crossing: the 100 MHz values are copied into a **snapshot register** in the 100 MHz domain (on each engine's `done` rising edge and/or a slow ~10 Hz tick). The 6.25 MHz OLED logic reads **only** the snapshot, except for the §8a graph registers and history RAM, which also change rarely enough to cost at worst one glitched pixel or frame. Since the values change rarely, a one-frame glitch at worst is acceptable.
 - **[T2: default]** Screen (`oled_screen`, v1.7): 96×64, RGB565, colours match the VGA overlay of each algorithm. Demo EDIT: which engines `sw[5:2]` selects (ON / OFF). Demo run: the engines ranked fastest first, two lines each: name, compute time in µs and finish place (`DFS 6.88us 1ST`), then `FASTEST`, `+gap us` behind the fastest, or `NO PATH`; `RUN` while searching, `OFF` when not selected. Time = `cycles` × 10 ns (100 MHz): the 6 decimal `cycles` digits with a point before the last two. `cycles` excludes `step_en = 0` cycles (§4.3), so this is the compute time at full speed, independent of the animation speed. GAME mode: the score in large digits (not engine data, so the §8 T1 rule above does not apply to it). `oled_dashboard` (the v1.5 screen) stays for `m2_race_top`. **Mirror (`sw[8]` = 1):** `oled_map` draws the VGA picture instead, without text: the EDIT map (start, goal, cursor cell), the 4-engine race (M2's `ast_oled_map4`), or the game (pellets, Pac-Man, ghosts). It then owns the engines' `cell_rd_addr` and `maze_ram`'s first VGA read port, so the VGA overlay is wrong while mirroring.
 - **Finish place** (derived only from the §4.3 signals): all engines start on the same edge and share `step_en`, so for a selected, done engine *e*, place = 1 + the number of other selected, done engines with fewer `cycles`. Ties share a place.
 
-## 8a. Performance graph [T1 for the interface, T2 for the screen]
+## 8a. Performance graph [T1 for the interface and metric, T2 for the screen]
 
-A full VGA screen that plots each engine's progress against time during and after a demo run. **M2 measures** (`m2_astar/ast_perf_sampler`) and **M1 stores and plots** (`m1_pathfind/gv_graph` + `gv_hist_ram`). `arena_top` wires them (M3 file, changed per §0).
+An OLED plot of each engine's progress to the goal against time, on the demo results view. **M2 measures and stores** (`m2_astar/ast_perf_probe`, `ast_perf_sampler`, `ast_perf_hist`). **M1 draws** (renderer in `m1_pathfind/`, added to `arena_top` and `oled_screen` per §0). The results screen stays as it is until the renderer is connected.
 
-**[T1] Sampler → graph interface** (all on `clk`, widths from `arena_defs.vh`; engine buses packed `{dfs, ast, dij, bfs}` and `hist_eng` = `ARENA_ENG_*`):
+**[T1] Metric.** For each selected engine:
+- `best` = the lowest `manhattan(cell, goal)` over the cells the engine has expanded so far. Only expanded cells count, so it never rises.
+- `d0` = `manhattan(start, goal)`.
+- `level = floor(LEVEL_MAX × (d0 − best) / d0)`, with `LEVEL_MAX` = `ARENA_PG_LEVEL_MAX` (46). Levels 0..46 are 0..100 % and are plot pixels, so the renderer needs no scaling.
 
-| Signal | Width | Meaning |
-|---|---|---|
-| `hist_we` | 1 | write one sample this cycle (at most one per clock) |
-| `hist_eng` | 2 | engine of the sample (`ARENA_ENG_BFS` .. `ARENA_ENG_DFS`) |
-| `hist_addr` | `GV_ADDR_W` (9) | sample index 0..511 |
-| `hist_data` | `GV_DATA_W` (8) | value, 0..255 = 0..100 % of the y axis |
-| `hist_count` | `GV_ADDR_W+1` | samples valid, 0..512, the same for every engine. The plot shows indices `0 .. hist_count-1`. **0 clears the plot** (set it when a run starts). |
-| `hist_plog` | `GV_PLOG_W` (5) | cycles per sample = 2^`hist_plog` (the x-axis caption prints 1 .. 1048576) |
-| `hist_metric` | 1 | 0 = progress to goal, 1 = maze explored (y-axis title) |
-| `hist_end` | 4 × `GV_ADDR_W` | sample index at which each engine finished (a white marker) |
-| `hist_end_valid` | 4 | `hist_end[e]` is meaningful |
+| Case | Curve |
+|---|---|
+| Before the first expansion | 0 |
+| Path found | ends at 100 %, so all finishing curves end at the same height |
+| `start == goal` | jumps to 100 % on the first expansion |
+| No path | stays below 100 %, so curves do **not** all meet |
+| Start or goal on a wall | stays 0 |
 
-Rules:
-1. Sample *i* of every engine is written **before** `hist_count` becomes greater than *i*.
-2. Engines that have finished keep being written with their final value until every selected engine is done, so lines continue flat to the right.
-3. Only engines in `run_mask` are drawn (the graph takes `run_mask` from the `vga_cdc` view bundle).
-4. `hist_count`, `hist_plog`, `hist_metric`, `hist_end*` cross to `clk_pix` through a `vga_cdc` in `arena_top` (applied once per frame); the samples go straight into `gv_hist_ram`'s write port.
-5. Suggested metrics (M2's choice): progress = 255 × (1 − min Manhattan distance from any expanded cell to the goal ÷ distance from start to goal); explored = 255 × `expansions` ÷ 192.
+**[T1] X axis.** One sample every 2^`plog` `step_en` cycles, so pauses do not count. The sampler starts at `plog` = 0. When sample `ARENA_PG_SAMPLES` (94) is due, it keeps every second sample and doubles the period, so every run fills 50–100 % of the 94 columns.
 
-**[T1] Sampler inputs** (M2 may add inputs with an `arena_top` change): `clk, rst, step_en` (demo `step_en`), `start` (the demo run's start pulse, never a GAME search), `run_mask, start_idx, goal_idx`, `current`, `expansions`, `busy`, `done`, `found` (4-engine buses) and `metric_sel` (`sw[11]`).
+**[T1] What the renderer reads.** All are registers or RAM reads on `clk` that may be read directly from the 6.25 MHz side. Engine buses are packed `{dfs, ast, dij, bfs}`, engine *e* at `[e*W +: W]`.
 
-**[T2: default] Screen** (`gv_graph`): shown instead of the normal picture when `sw[9]` and `sw[10]` are both on, in demo mode (GAME wins). Plot area 1536×768 px (3 px per sample, 3 px per level), y axis 0–100 % with grid lines every 25 %, a vertical grid line every 64 samples, step lines in the VGA engine colours (BFS cyan, Dijkstra yellow, A* green, DFS pink; A* drawn on top), title per metric, legend (unselected engines grey), x-axis caption with the cycles per sample, or `NO DATA YET` while `hist_count` = 0. Latency 4 `clk_pix` cycles, the same as `vga_render`, so the two pictures share `vga_timing`.
+| Signal | From | Width | Meaning |
+|---|---|---|---|
+| `rd_idx` (input) | `ast_perf_hist` | `PG_ADDR_W` (7) | sample to read, 0..`count`-1 |
+| `rd_level` | `ast_perf_hist` | 4 × `PG_LEVEL_W` (6) | each engine's level at `rd_idx` (combinational) |
+| `rd_prev_level` | `ast_perf_hist` | 4 × `PG_LEVEL_W` | the same at `rd_idx`-1, or at 0 when `rd_idx` = 0. Fill a column from this level to `rd_level` so curves stay continuous. |
+| `count` | `ast_perf_sampler` | `PG_ADDR_W` | samples valid, 0..94. **0 = empty plot** (cleared when a run starts). |
+| `mask` | `ast_perf_sampler` | 4 | engines in this run; draw only these |
+| `end_idx`, `end_valid` | `ast_perf_sampler` | 4 × `PG_ADDR_W`, 4 | the sample where each engine finished, and whether it has |
+| `plog` | `ast_perf_sampler` | 5 | cycles per sample = 2^`plog` |
+| `snap_order` | `oled_stats` | 4 × 2 | engine ids, fastest first; `snap_order[1:0]` finished first |
+| `cyc_bcd` | `oled_stats` | 4 × 24 | each engine's `cycles`, 6 BCD digits. × 10 ns = its time (§8). |
+| `gap_bcd` | `oled_stats` | 4 × 24 | each engine's `cycles` − the fastest's, 6 BCD digits |
+
+**[T1] Timing.**
+- **Exact figures:** the first finisher's time and every gap come from `cyc_bcd` and `gap_bcd`, and are cycle-exact and unaffected by pauses. They update with the ~10 Hz snapshot.
+- **Plot position:** an engine's `end_idx` × 2^`plog` is never more than 2 cycles before its true `cycles` and never more than 14 cycles + 2 samples after it. `end_idx` keeps the finishing order, and the curve has reached its final level at `end_idx`.
+- **Pauses:** pausing doesn't change final levels or `cycles`. It can shift a mid-run level or a marker slightly, within the bound above.
+
+**[T1] Sampler rules.**
+1. A sample is written before `count` includes it, and `count`, `plog`, `rot` and the end markers change together, as the write lands.
+2. After the last selected engine is done, a final sample holds the final levels and the sampler ignores the engines until the next demo `start`, so GAME searches never reach the plot. This also applies with `step_en` = 0 (an abandoned run).
+3. `start` is the demo start pulse only, never a GAME search.
+4. Inputs: `clk, rst, step_en` (demo), `start, run_mask, start_idx, goal_idx`, and the 4-engine buses `current, expansions, done`. M2 may add inputs with an `arena_top` change.
+
+**[T2: default] Screen** (M1's choice): 2 text lines above a 47 px plot (`y` = 62 − level, `x` = sample + 1, axes at `x` = 0 and `y` = 63). The fastest engine shows its time and the others `+x.xx`, each in its engine's colour (BFS cyan, Dijkstra yellow, A* green, DFS pink; A* on top). A curve stops at its engine's finish. `docs/reference/ast_oled_graph.v.txt` is an untested earlier draft M1 may use or ignore.
 
 ## 9. Top-level ports and pin ownership [T1]
 
@@ -287,7 +305,7 @@ Rules:
 | `clk` | W5 | everyone (100 MHz) |
 | `btnU` | T18 | **reset** in demo mode (feeds `rst`); "up" in GAME mode (`sw[6]` = 1), where it does not reset |
 | `btnC`, `btnL`, `btnR`, `btnD` | U18, W19, T17, U17 | M3 (`sys_ctrl`) |
-| `sw[15:0]` | Basys 3 standard | M3; `sw[10:9]` = M1 performance graph screen (both on), `sw[11]` = M2 graph metric (§8a), `sw[12]` reserved for M1/M2 debug |
+| `sw[15:0]` | Basys 3 standard | M3; `sw[12:9]` reserved for M1/M2 debug |
 | `led[8:0]` | | M3: engine status |
 | `led[11:9]` | | **M1 debug** (via `dbg_` ports) |
 | `led[14:12]` | | **M2**: DFS status `{found, done, busy}` |
@@ -300,7 +318,7 @@ Rules:
 **[T2: default] Controls** (M3 may change; record in `m3_io/INTERFACE.md`):
 - **Buttons (demo):** BTNU = reset · BTNC = start run / confirm · BTNL = pause/resume · BTNR = clear maze · BTND = generate random maze.
 - **Buttons (GAME):** BTNU / BTND / BTNL / BTNR = up / down / left / right (Pac-Man style: a press sets the direction, he keeps moving and takes a queued turn at the first open cell) · BTNC = start level / pause-resume / next level / restart.
-- **Switches:** `sw[1:0]` = edit tool (00 wall, 01 start, 10 goal, 11 weight) · `sw[5:2]` = engines to run (`sw[2]` BFS, `sw[3]` Dijkstra, `sw[4]` A*, `sw[5]` DFS; in GAME, the levels cycle through the selected engines instead of the default DFS, Dijkstra, BFS, A*) · `sw[6]` = GAME mode · `sw[7]` = VGA theme in demo mode (0 classic, 1 Pac-Man; GAME is always Pac-Man) · `sw[8]` = OLED mirror of the VGA picture (testing without a monitor; see §8) · `sw[9]` + `sw[10]` = performance graph screen, `sw[11]` = graph metric (§8a) · `sw[15:13]` = animation speed (000 = full speed … 111 = slowest).
+- **Switches:** `sw[1:0]` = edit tool (00 wall, 01 start, 10 goal, 11 weight) · `sw[5:2]` = engines to run (`sw[2]` BFS, `sw[3]` Dijkstra, `sw[4]` A*, `sw[5]` DFS; in GAME, the levels cycle through the selected engines instead of the default DFS, Dijkstra, BFS, A*) · `sw[6]` = GAME mode · `sw[7]` = VGA theme in demo mode (0 classic, 1 Pac-Man; GAME is always Pac-Man) · `sw[8]` = OLED mirror of the VGA picture (testing without a monitor; see §8) · `sw[15:13]` = animation speed (000 = full speed … 111 = slowest).
 - **Mouse:** left = apply tool, right = erase, wheel = zoom the RUN view about the cursor (1×–8×), middle = reset zoom.
 - **LEDs:** `led[2:0]` = BFS busy/done/found, `led[5:3]` = Dijkstra, `led[8:6]` = A*, `led[14:12]` = DFS (dark when that engine isn't selected, and in GAME mode).
 
@@ -346,6 +364,10 @@ The code already in the repo predates this contract. These changes bring it into
 - [x] Write `manhattan.v` + `tb_manhattan.v`.
 - [x] Write the reference model in `arena/ref/` and the expected results for the shared mazes.
 - [x] v1.6: add `dfs_engine` + `tb_dfs_engine`, DFS in the reference model (`<name>.dfs.expect`), and wire it through `pathfind_top`, `arena_top`, `sys_ctrl`, `vga_render` and `oled_dashboard`.
+- [x] v1.9: performance graph measurement and history (`ast_perf_probe`, `ast_perf_sampler`, `ast_perf_hist`) with `tb_ast_perf_probe`, `tb_ast_perf_hist`, `tb_ast_perf_sampler`, `tb_ast_perf_trace`, and progress traces in the reference model (`<name>.perf.expect`).
+
+**M1 (performance graph)**
+- [ ] v1.9: OLED renderer for §8a, connected in `arena_top` and `oled_screen`, with its testbench.
 
 **M3**
 - [x] `ip/`: add Digilent `MouseCtl.vhd` **and its dependency `Ps2Interface.vhd`**. Both are now in `arena/ip/`; `MouseCtl` moved from the old GPT5 lab, which has been removed.
@@ -367,3 +389,4 @@ The code already in the repo predates this contract. These changes bring it into
 | 1.6 | 2026-11-04 | **Tier-1:** fourth engine `dfs_engine` (M2, `m2_astar/`; written 2026-11-02 as "1.5" on a branch, renumbered when merged after the 1080p v1.5). §4/§4.3/§4.5: DFS port list, metric and path rules (any valid path, fixed U/D/L/R order). §5: `dfs_` prefix group and `u_dfs` instance in `pathfind_top`. §8: four OLED rows. §9: `led[14:12]` = DFS status (was M2 debug); VGA RUN bottom-right quadrant = DFS (was the legend; the legend is now a half-size strip in that quadrant's right margin). §10.3: DFS cross-check rules. `arena_defs.vh`: `ARENA_ENG_DFS`. §5: `run_mask[3:0]` shared input (per-engine start gate). §7/§9: `sw[5:2]` engine selection, DONE = all selected engines done; the Pac-Man theme switch moves from `sw[2]` to `sw[6]`. §8: OLED shows finish place (rule in §8) and decimal values. M1 (`pathfind_top`) and M3 (`arena_top`, `sys_ctrl`, `vga_render`, `oled_dashboard`) files updated by M2 per §0. |
 | 1.7 | 2026-11-04 | **Tier-1:** §9: `btnU` is the reset only in demo mode; in GAME mode (`sw[6]` = 1) it is "up" and never resets. `sw[6]` = GAME mode; the VGA theme moves to `sw[7]`. §7: GAME mode description (`game_ctrl` drives the engines through the unchanged §4 handshake, one engine at a time, and reads routes with `path_rd_addr`; `sys_ctrl` held in EDIT). §8: OLED screen = engine selection / ranked compute times in µs with the gap to the fastest / GAME score (`oled_screen`; `oled_stats` gains `gap_bcd` and `snap_order` outputs, existing ports unchanged so `m2_race_top` is unaffected). §9 controls, LEDs and VGA defaults for GAME. §8/§9: `sw[8]` OLED mirror of the VGA picture (`oled_map`). No change to the engines, `pathfind_top` or `common/`. |
 | 1.8 | 2026-11-05 | **Tier-1:** new §8a performance graph: sampler → graph interface (`hist_*`), rules and sampler inputs; M2 measures (`ast_perf_sampler`, committed as a stub with the agreed ports and tied-off outputs for M2 to fill in), M1 stores and plots (`gv_graph`, `gv_hist_ram`). `arena_defs.vh`: `ARENA_GV_ADDR_W/DATA_W/PLOG_W`. §1: new files, `gv_` prefix. §2: `gv_graph` / `gv_hist_ram` read side on `clk_pix`. §9: `sw[10:9]` graph screen, `sw[11]` graph metric (`sw[12]` stays reserved). `arena_top` (M3) wires the sampler, a second `vga_cdc` and the VGA screen mux, per §0. No change to the engines or `pathfind_top`. |
+| 1.9 | 2026-11-05 | **Tier-1:** §8a rewritten: the performance graph moves from a VGA screen to the OLED results view. The `hist_*` interface, `gv_graph`, `gv_hist_ram`, the second `vga_cdc` and the VGA mux are removed, and the "maze explored" metric is dropped. M2 now owns the history (`ast_perf_hist`, rotated addressing) and defines the metric exactly; M1 draws, with `oled_stats` supplying the timing labels. `arena_defs.vh`: `ARENA_GV_*` replaced by `ARENA_PG_*`. §1 and §2: `gv_*` removed. §8: exception for the graph. §9: `sw[11:9]` freed (`sw[12:9]` reserved). `arena_top` wires the sampler and history, read side unconnected until M1's renderer. Reference model: `<name>.perf.expect`, `<name>.perf.total`; `dijkstra()` now mirrors `dij_min_heap`'s pop order. No change to the engines or `pathfind_top`. |
