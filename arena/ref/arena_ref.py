@@ -189,10 +189,10 @@ def dijkstra(costs, start, goal):
 
 
 # --------------------------------------------------------------------------
-# A* : mirrors rtl/m2_astar/astar_engine.v (linear-scan open set)
+# A* : mirrors rtl/m2_astar/astar_engine.v (the same pop order as its heap)
 #
 # Hardware rules reproduced exactly:
-#   * open set = per-cell (f, g) + open flag; pushing a cell that is already
+#   * open set = one (f, g) per open cell; pushing a cell that is already
 #     open just overwrites its f/g (decrease-key).
 #   * pop picks the minimum by: lowest f, then HIGHEST g, then LOWEST index.
 #     (Higher g on an f-tie = the node closer to the goal, which cuts
@@ -213,7 +213,7 @@ def astar(costs, start, goal):
     closed = set()
     expansions = 0
     while open_f:
-        # Linear-scan selection, same priority order as the hardware.
+        # Same priority order as the hardware (software can just scan).
         u = min(open_f, key=lambda i: (open_f[i], -g[i], i))
         del open_f[u]
         closed.add(u)

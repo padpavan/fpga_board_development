@@ -4,7 +4,7 @@ Owner-editable (Tier 2). Binding rules live in `/CONTRACT.md`.
 
 ## Current state
 - `astar_engine.v` is the **real A\* engine** with the exact CONTRACT §4 port list plus one optional `dbg_state[3:0]` output.
-  - The open set is `ast_open_set` (linear scan over all cells).
+  - The open set is `ast_open_set` (indexed binary min-heap, since 2026-11-05).
   - `tb_astar_engine` PASS: every shared maze and start/goal pair, exact cost/cells/expansions vs `ref/`, the path RAM and `cell_state` checked, random `step_en`, restart from DONE, `rst` mid-run.
 - `dfs_engine.v` is the **DFS engine** (CONTRACT v1.5), same port list, no `dbg_` ports. See "DFS engine" below.
 - `tb_m2_crosscheck` PASS against M1's current `dijkstra_engine`: identical `path_cost` on 53 runs. A\* used 1935 expansions in total vs Dijkstra's 3994, and was never worse.
@@ -17,17 +17,17 @@ M1's `pathfind_top` instantiates both M2 engines: `u_astar` (prefix `ast_`, plus
 ## Engine behaviour others may rely on (M3)
 - **`start`** is accepted from IDLE or DONE **even while `step_en = 0`**, so `busy` always rises the cycle after `start`. The search itself only advances on `step_en` cycles.
 - **Latency:** INIT (clearing the state RAMs) takes NUM_CELLS = 192 cycles.
-  - Each expansion costs about 202 cycles (a 193-cycle open-set scan + 8 neighbour cycles (NB + NB_WR per direction) + overhead).
+  - Each expansion costs about 19 cycles (median, 9-28 measured): POP + POP_WAIT + 8 neighbour cycles (NB + NB_WR per direction) + waits for the heap to re-sort.
   - Sample full-speed `cycles`:
 
   | Maze | cycles | expansions |
   |---|---|---|
-  | open, 0 → 191 | 5668 | 27 |
-  | weighted | 19401 | 95 |
-  | unreachable | 37356 | 183 |
-  | start == goal | 390 | 1 |
+  | open, 0 → 191 | 838 | 27 |
+  | weighted | 1944 | 95 |
+  | unreachable | 3524 | 183 |
+  | start == goal | 200 | 1 |
 
-  For comparison, M1's Dijkstra (indexed min-heap since 2026-11-01) takes 2282 cycles on the open grid 0 → 191, so A\* is now the slowest engine in cycles while still expanding the fewest cells.
+  For comparison, M1's Dijkstra (also an indexed min-heap) takes 2282 cycles on the open grid 0 → 191. A\* costs more per cell, because every key is unique and it pushes more cells per expansion, but it usually expands far fewer.
 - **`cell_state`** has its own LUTRAM copy, so it's readable at any time with no effect on the search. All cells go to UNSEEN during INIT.
 - **Path RAM:** addr 0 = start ... addr `path_cells-1` = goal, valid while `done && found`.
 - **`current`** = the last cell expanded (`IDX_NONE` from start until the first expansion).
@@ -53,7 +53,7 @@ M1's `pathfind_top` instantiates both M2 engines: `u_astar` (prefix `ast_`, plus
   - A wall endpoint gives 193 cycles.
 - **`cell_state`:** FRONTIER = on the current branch, VISITED = backtracked dead end, PATH = final path. When done, no FRONTIER cells remain and #VISITED + #PATH == expansions.
 - **`current`** = top of the stack (`IDX_NONE` until the start is pushed).
-- **Typical numbers (open grid 0 → 191):** 688 cycles, 181 expansions, path cost 180, against BFS 1204 cycles / cost 26, Dijkstra 2282 / 26, A\* 5668 / 26. DFS is the cheapest per step but its path snakes through the whole grid. That contrast is the point of the comparison.
+- **Typical numbers (open grid 0 → 191):** 688 cycles, 181 expansions, path cost 180, against BFS 1204 cycles / cost 26, Dijkstra 2282 / 26, A\* 838 / 26. DFS is the cheapest per step but its path snakes through the whole grid. That contrast is the point of the comparison.
 - **Hazards:** writes are registered and gated by `step_en` (same scheme as `bfs_engine`). The only same-slot read-after-write is `start == goal` (S_PUSH_START writes stack[0] and S_MARK reads it next step); `stk_q` forwards it.
 - **Test:** `tb_dfs_engine` checks every shared maze run exactly against `<name>.dfs.expect` (cost, cells, expansions, **cycles**), plus path validity, cell_state census, random `step_en`, restart from done, start while busy, `rst` mid-run and start == goal.
 
@@ -90,12 +90,12 @@ M1's `pathfind_top` instantiates both M2 engines: `u_astar` (prefix `ast_`, plus
   - `g_new = g_u + cost_v` and `f_new = g_new + h_v`;
   - `improve = valid & !wall & !closed & (!seen | g_new < g_old)`;
   - seen/closed are decoded from the 2-bit cell state (PATH counts as closed).
-- `ast_open_set.v`: the open set, a linear scan. One slot per cell (`open` bit + `{f,g}` in LUTRAM), so push = insert or decrease-key and duplicates are impossible.
+- `ast_open_set.v`: the open set, an indexed binary min-heap, separate from M1's `dij_min_heap`. The key is one word, `{f, ~g, idx}`, with f and g stored in `COST_W + INDEX_W` bits. `pos[]` + `open[]` make a re-push overwrite the key and move the entry, so duplicates are impossible.
   - Ports: `clk, rst, step_en, clr, push, push_idx, push_f, push_g, pop_req -> ready, pop_valid, pop_idx, pop_empty`.
-  - Commands are accepted only when `ready && step_en`. clr wins over the others. push + pop_req in the same cycle is allowed (the scan sees the push).
-  - Latency (step_en cycles): clr -> ready after NUM_CELLS; pop_req -> pop_valid after NUM_CELLS+1.
+  - Commands are accepted only when `ready && step_en`. clr wins over the others. push + pop_req in the same cycle is allowed (the push goes first, so the pop sees it).
+  - Latency (step_en cycles): clr -> ready after NUM_CELLS; pop_req -> pop_valid after 1. After a push or pop, `ready` stays low while the heap re-sorts (2 cycles per level, 16 at most seen in `tb_ast_open_set`). `pop_idx` stays valid during the re-sort.
   - Pop order: lowest f, then highest g, then lowest idx. The RAMs aren't reset, so clr before first use.
-- The engine waits for `ready` before every push and pop. A popped cell is never already VISITED: closed cells are never pushed again, and the scan keeps one slot per cell.
+- The engine waits for `ready` before every push and pop, but a non-improving neighbour doesn't wait, so the search keeps going during a re-sort. A popped cell is never already VISITED: closed cells are never pushed again, and the heap holds each cell at most once.
 
 ## Board bring-up (not part of the arena build)
 - Files: `m2_test_top.v`, helpers `ast_test_maze.v`, `ast_sevenseg_hex.v` and `ast_oled_view.v`.
@@ -159,4 +159,5 @@ sim/run_m2.sh tb_<name> [extra .v]       # compile + run one testbench, exit 0 o
   - That's acceptable for a test view; M3's dashboard follows the §8 snapshot rule.
 - 2026-10-23: Split the neighbour step into NB (evaluate + register the relax result) and NB_WR (write g/parent/state, push). The read → add → compare chain no longer runs into the RAM write enables and open-set push in one cycle, for 100 MHz timing. Adds 4 cycles per expansion. Paths and expansions are unchanged; all M2 testbenches PASS and the Dijkstra cross-check still PASSES.
 - 2026-10-22: Did not edit M1's `pathfind_top.v`: it still lacks the shared `step_en`/`cell_rd_addr` ports (M1's §12 work). The snippet is above.
+- 2026-11-05: Open set back to a binary heap, new code in the course-level style (FSM, `assign`, `?:`), because the linear scan's ~193 cycles per pop made A\* last in 99% of a 1,796-run sweep. Pop order is unchanged: on all 1,796 runs expansions, path cells and cost match the scan and only `cycles` changed (worst case 39,002 -> 3,928; open grid 5668 -> 838). Full `arena_top` place and route: `sys_clk_pin` WNS +0.025 ns, `u_os` worst path +0.411 ns, `ast_open_set` 397 -> 821 LUTs, whole design 48.2% -> 50.5% LUTs. The LUT and timing figures earlier in this file predate this change.
 - 2026-10-23: Simplified M2 to course-level Verilog (intro course, taught up to modular FSMs). Removed the binary-heap open set (`ast_open_set_heap`, `USE_HEAP`, the `generate` block, and the engine's stale-pop path, which only the heap needed). Replaced the `function`s and the default-then-override `always @(*)` blocks with `assign` + `?:`. `` `ARENA_* `` macros now appear only in the `` `include `` line and the parameter/localparam declarations at the top of each module; module bodies use plain names. Paths, expansions and cycles are unchanged. Every M2 testbench and the Dijkstra cross-check PASS under Vivado xsim 2025.2.

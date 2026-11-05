@@ -1,7 +1,7 @@
 `timescale 1ns / 1ps
 `include "arena_defs.vh"
 //////////////////////////////////////////////////////////////////////////////
-// tb_ast_open_set : self-check of the linear-scan open set
+// tb_ast_open_set : self-check of the heap open set
 //
 // A software copy of the set (m_open / m_f / m_g, one slot per cell) is kept
 // in step with every command, and every pop is checked against the model's
@@ -10,15 +10,17 @@
 // Phases
 //   1. empty pop after clr               -> pop_empty
 //   2. tie-break order                   -> higher g first, then lower idx
-//   3. decrease-key                      -> re-push overwrites, no duplicate
+//   3. re-push, better and worse key     -> overwrites, moves, no duplicate
 //   4. fill all 192 cells, pop all 192   -> sorted order, then empty
-//   5. push + pop_req in the same cycle  -> scan sees the push
+//   5. push + pop_req in the same cycle  -> the pop sees the push
 //   6. 3000 random push/pop/clr ops      (small f/g range forces many ties)
 //   7. phase 6 again with step_en randomly toggling: same results, and the
 //      latencies counted in step_en=1 cycles stay exact
+//   8. largest f and g the engine can produce, on a full heap
 // Every clr and pop also checks the documented latency:
 //   clr: ready again after NUM_CELLS step cycles
-//   pop: pop_valid NUM_CELLS+1 step cycles after the request is accepted
+//   pop: pop_valid 1 step cycle after the request is accepted
+//   any: ready again within MAX_SORT step cycles of a push or pop
 // Ends with "PASS: ..." or "FAIL: ..." (CONTRACT 10).
 //
 // Timing convention: inputs (incl. step_en) change on the FALLING edge; a
@@ -28,6 +30,8 @@ module tb_ast_open_set;
     localparam NUM_CELLS = `ARENA_NUM_CELLS;
     localparam INDEX_W   = `ARENA_INDEX_W;
     localparam DIST_W    = `ARENA_DIST_W;
+    localparam VAL_W     = `ARENA_COST_W + INDEX_W;   // stored f/g width
+    localparam MAX_SORT  = 2 * INDEX_W + 2;           // worst re-sort, 2 per level
 
     reg clk = 1'b0;
     always #5 clk = ~clk;                       // 100 MHz
@@ -59,6 +63,7 @@ module tb_ast_open_set;
 
     integer errors = 0;
     integer n_push = 0, n_pop = 0, n_empty = 0, n_clr = 0;
+    integer max_wait = 0;
 
     // Model's next pop: returns index, or -1 if empty.
     function integer model_min(input dummy);
@@ -94,6 +99,20 @@ module tb_ast_open_set;
         end
     endtask
 
+    // Wait (on falling edges) until a command may be issued.
+    task wait_idle;
+        integer n;
+        begin
+            n = 0;
+            while (!ready) begin
+                @(negedge clk);
+                if (step_en) n = n + 1;
+            end
+            if (n > max_wait) max_wait = n;
+            if (n > MAX_SORT) fail("re-sort took too long");
+        end
+    endtask
+
     task fail(input [8*60-1:0] msg);
         begin
             errors = errors + 1;
@@ -106,7 +125,7 @@ module tb_ast_open_set;
         integer i, n;
         begin
             @(negedge clk);
-            if (!ready) fail("clr issued while not ready");
+            wait_idle;
             clr = 1'b1;
             wait_accept;
             #1;
@@ -125,7 +144,7 @@ module tb_ast_open_set;
     task do_push(input integer idx, input integer f, input integer g);
         begin
             @(negedge clk);
-            if (!ready) fail("push issued while not ready");
+            wait_idle;
             push = 1'b1; push_idx = idx; push_f = f; push_g = g;
             wait_accept;
             m_open[idx] = 1'b1; m_f[idx] = f; m_g[idx] = g;
@@ -140,7 +159,7 @@ module tb_ast_open_set;
         integer expect, lat;
         begin
             @(negedge clk);
-            if (!ready) fail("pop_req issued while not ready");
+            wait_idle;
             pop_req = 1'b1;
             if (also_push) begin
                 push = 1'b1; push_idx = idx; push_f = f; push_g = g;
@@ -162,14 +181,16 @@ module tb_ast_open_set;
                         lat = lat + 1;
                         if (pop_valid) disable wait_valid;
                     end
-                    if (lat > NUM_CELLS + 5) begin
+                    if (lat > 4 * MAX_SORT) begin
                         fail("pop timeout");
                         disable wait_valid;
                     end
                 end
             end
 
-            if (lat != NUM_CELLS + 1) fail("pop latency != NUM_CELLS+1");
+            // a pop on its own reports on the next step; one issued with a
+            // push waits for that push to finish first
+            if (!also_push && lat != 1) fail("pop latency != 1");
             if (expect < 0) begin
                 if (!pop_empty) fail("expected empty pop");
                 n_empty = n_empty + 1;
@@ -240,13 +261,21 @@ module tb_ast_open_set;
         pop_expect(1);
         pop_expect(-1);
 
-        // 3. decrease-key: re-pushing overwrites, never duplicates
+        // 3. re-pushing overwrites, never duplicates
         do_push(7, 20, 0);
         do_push(8, 15, 0);
         do_push(7, 1, 0);                       // 7 now beats 8
         pop_expect(7);
         pop_expect(8);
         pop_expect(-1);                         // 7 must not come back
+        for (i = 0; i < 12; i = i + 1)
+            do_push(i, 10 + i, 0);
+        do_push(0, 40, 0);                      // the root gets worse: moves down
+        do_push(1, 41, 0);                      // an inner entry gets worse
+        do_push(11, 1, 0);                      // a leaf gets better: moves up
+        for (i = 0; i < 12; i = i + 1)
+            do_pop;
+        pop_expect(-1);
 
         // 4. fill every cell with a scrambled f, pop all in order
         for (i = 0; i < NUM_CELLS; i = i + 1)
@@ -255,7 +284,7 @@ module tb_ast_open_set;
             do_pop;
         pop_expect(-1);
 
-        // 5. push and pop_req in the same cycle: the scan must see the push
+        // 5. push and pop_req in the same cycle: the pop must see the push
         do_push(40, 9, 0);
         do_pop_x(1'b1, 41, 3, 0);               // 41 pushed with better f, same cycle
         pop_expect(40);
@@ -270,7 +299,17 @@ module tb_ast_open_set;
         random_ops(1500);
         rand_step = 1'b0;
 
-        $display("  %0d pushes, %0d pops (%0d empty), %0d clears", n_push, n_pop, n_empty, n_clr);
+        // 8. the stored widths hold the largest values on a full heap
+        do_clr;
+        for (i = 0; i < NUM_CELLS; i = i + 1)
+            do_push(i, (1 << VAL_W) - 1 - (i % 3), (1 << VAL_W) - 1 - (i % 5));
+        for (i = 0; i < NUM_CELLS; i = i + 1)
+            do_pop;
+        pop_expect(-1);
+
+        wait_idle;
+        $display("  %0d pushes, %0d pops (%0d empty), %0d clears, longest wait %0d steps",
+                 n_push, n_pop, n_empty, n_clr, max_wait);
         if (errors == 0)
             $display("PASS: tb_ast_open_set (0 errors)");
         else

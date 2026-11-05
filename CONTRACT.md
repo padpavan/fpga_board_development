@@ -1,6 +1,6 @@
 # CONTRACT.md: FPGA Pathfinding Arena (Group S1_18)
 
-**Version 1.6** · Basys 3 (xc7a35tcpg236-1) · Verilog-2001
+**Version 1.7** · Basys 3 (xc7a35tcpg236-1) · Verilog-2001
 
 This file is the integration contract for the three members' work. Read it fully **before** writing any project code, whether you're a human or an AI agent. It defines only what crosses a member boundary. Everything inside a member's own block is that member's choice.
 
@@ -65,7 +65,8 @@ arena/                      <- THE integrated project
   rtl/m2_astar/             <- M2 owns
     astar_engine.v, dfs_engine.v, manhattan.v, (profiling helpers, ...)
   rtl/m3_io/                <- M3 owns
-    arena_top.v, sys_ctrl, maze_ram, maze_gen/lfsr, mouse_if, vga_*, oled_dashboard
+    arena_top.v, sys_ctrl, maze_ram, maze_gen/lfsr, mouse_if, vga_*, oled_*,
+    game_* (GAME mode: game_ctrl, game_board, game_player, game_ghosts, game_targets, game_step)
   ip/                       <- third-party files (Digilent MouseCtl + Ps2Interface)
   constraints/arena_basys3.xdc  <- the ONE master XDC (M3 edits)
   sim/                      <- all testbenches tb_<module>.v
@@ -235,13 +236,15 @@ The only Tier-1 parts are the engine handshake (§4) and the frozen-maze rule (�
                     └──────────────────────────► vga_render       metrics latch ─► oled_dashboard
 ```
 
+**GAME mode (v1.7, `sw[6]` = 1).** `game_ctrl` (M3) takes over the engines, the load bus and the buttons. `sys_ctrl` is held in EDIT (`hold`), so a demo run in progress is abandoned and the maze, start and goal stay frozen. The game starts once `sys_ctrl` is in EDIT and no engine is busy, and it keeps the engines until its last search has finished after `sw[6]` goes off. It uses the engines only through the §4 handshake: it loads the current maze once per level over the load bus (only while no search is in flight), then repeatedly starts **one** engine (`run_mask` one-hot, `step_en` = 1) from a ghost's cell to that ghost's target cell and reads the route through `path_rd_addr` (addr 1 = the ghost's next cell). The demo start marker is the player spawn and the goal marker is the ghost spawn. Ghost targets (`game_targets`): red = Pac-Man, pink = 3 cells ahead of him, cyan = 3 cells behind, orange = his cell mirrored away from red; a ghost goes straight for Pac-Man when its target is a wall or unreachable, when it stands on it, or when it is within 2 cells of him (so ghosts that meet do not merge). A BFS / Dijkstra / A* ghost replans before every step; a DFS ghost follows its whole path before replanning (replanning DFS every step makes it shuttle between two cells). Levels L1–L4: DFS 2 ghosts 750 ms/cell, Dijkstra 3 ghosts 600 ms, BFS 3 ghosts 475 ms, A* 4 ghosts 350 ms; the player moves every 200 ms. If any of `sw[5:2]` is on when a level starts, the levels cycle through the selected engines instead (order BFS, Dijkstra, A*, DFS; level *L* uses selected engine *L* mod *n*). Eat every reachable pellet to clear a level; 3 lives; score 10 per pellet + 500 × level per clear.
+
 Suggested `sys_ctrl` states: **EDIT** (mouse edits / generator writes `maze_ram`) → **LOAD** (stream all 192 cells into the engines over the load bus, 1 cell/clk) → **RUN** (pulse `start`; drive `step_en` from the speed and pause controls) → **DONE** (every *selected* engine `done`; show results) → back to EDIT. **PAUSE** holds `step_en = 0`. The engine selection (`sw[5:2]`) is latched into `run_mask` when the run starts; a run with nothing selected is ignored.
 
 ## 8. Metrics to the OLED [T1 for the signals, T2 for the screen]
 
 - **[T1]** The OLED dashboard shows only the §4.3 signals (`cycles`, `expansions`, `path_cells`, `path_cost`) and status (`busy/done/found/no_path`) of each engine. No other engine data may be required.
 - **[T1]** Clock-domain crossing: the 100 MHz values are copied into a **snapshot register** in the 100 MHz domain (on each engine's `done` rising edge and/or a slow ~10 Hz tick). The 6.25 MHz OLED logic reads **only** the snapshot. Since the values change rarely, a one-frame glitch at worst is acceptable.
-- **[T2: default]** Screen: 96×64, RGB565, two text lines per algorithm (BFS / DIJ / A* / DFS), in decimal: finish place (`#1`..`#4`), cycles, expansions, path cost and status (FOUND / NOPTH / BUSY / IDLE, or OFF when not selected). Colours match the VGA overlay of the same algorithm.
+- **[T2: default]** Screen (`oled_screen`, v1.7): 96×64, RGB565, colours match the VGA overlay of each algorithm. Demo EDIT: which engines `sw[5:2]` selects (ON / OFF). Demo run: the engines ranked fastest first, two lines each: name, compute time in µs and finish place (`DFS 6.88us 1ST`), then `FASTEST`, `+gap us` behind the fastest, or `NO PATH`; `RUN` while searching, `OFF` when not selected. Time = `cycles` × 10 ns (100 MHz): the 6 decimal `cycles` digits with a point before the last two. `cycles` excludes `step_en = 0` cycles (§4.3), so this is the compute time at full speed, independent of the animation speed. GAME mode: the score in large digits (not engine data, so the §8 T1 rule above does not apply to it). `oled_dashboard` (the v1.5 screen) stays for `m2_race_top`. **Mirror (`sw[8]` = 1):** `oled_map` draws the VGA picture instead, without text: the EDIT map (start, goal, cursor cell), the 4-engine race (M2's `ast_oled_map4`), or the game (pellets, Pac-Man, ghosts). It then owns the engines' `cell_rd_addr` and `maze_ram`'s first VGA read port, so the VGA overlay is wrong while mirroring.
 - **Finish place** (derived only from the §4.3 signals): all engines start on the same edge and share `step_en`, so for a selected, done engine *e*, place = 1 + the number of other selected, done engines with fewer `cycles`. Ties share a place.
 
 ## 9. Top-level ports and pin ownership [T1]
@@ -251,7 +254,7 @@ Suggested `sys_ctrl` states: **EDIT** (mouse edits / generator writes `maze_ram`
 | Port | Pins | Driven / used by |
 |---|---|---|
 | `clk` | W5 | everyone (100 MHz) |
-| `btnU` | T18 | **reset** (fixed). Feeds `rst` |
+| `btnU` | T18 | **reset** in demo mode (feeds `rst`); "up" in GAME mode (`sw[6]` = 1), where it does not reset |
 | `btnC`, `btnL`, `btnR`, `btnD` | U18, W19, T17, U17 | M3 (`sys_ctrl`) |
 | `sw[15:0]` | Basys 3 standard | M3; `sw[12:9]` reserved for M1/M2 debug selects |
 | `led[8:0]` | | M3: engine status |
@@ -264,12 +267,13 @@ Suggested `sys_ctrl` states: **EDIT** (mouse edits / generator writes `maze_ram`
 | `oled_cs, oled_sdin, oled_sclk, oled_d_cn, oled_resn, oled_vccen, oled_pmoden` | Pmod JB | M3 (`Oled_Display`) |
 
 **[T2: default] Controls** (M3 may change; record in `m3_io/INTERFACE.md`):
-- **Buttons:** BTNC = start run / confirm · BTNL = pause/resume · BTNR = clear maze · BTND = generate random maze.
-- **Switches:** `sw[1:0]` = edit tool (00 wall, 01 start, 10 goal, 11 weight) · `sw[5:2]` = engines to run (`sw[2]` BFS, `sw[3]` Dijkstra, `sw[4]` A*, `sw[5]` DFS) · `sw[6]` = VGA theme (0 classic, 1 Pac-Man) · `sw[15:13]` = animation speed (000 = full speed … 111 = slowest).
+- **Buttons (demo):** BTNU = reset · BTNC = start run / confirm · BTNL = pause/resume · BTNR = clear maze · BTND = generate random maze.
+- **Buttons (GAME):** BTNU / BTND / BTNL / BTNR = up / down / left / right (Pac-Man style: a press sets the direction, he keeps moving and takes a queued turn at the first open cell) · BTNC = start level / pause-resume / next level / restart.
+- **Switches:** `sw[1:0]` = edit tool (00 wall, 01 start, 10 goal, 11 weight) · `sw[5:2]` = engines to run (`sw[2]` BFS, `sw[3]` Dijkstra, `sw[4]` A*, `sw[5]` DFS; in GAME, the levels cycle through the selected engines instead of the default DFS, Dijkstra, BFS, A*) · `sw[6]` = GAME mode · `sw[7]` = VGA theme in demo mode (0 classic, 1 Pac-Man; GAME is always Pac-Man) · `sw[8]` = OLED mirror of the VGA picture (testing without a monitor; see §8) · `sw[15:13]` = animation speed (000 = full speed … 111 = slowest).
 - **Mouse:** left = apply tool, right = erase, wheel = zoom the RUN view about the cursor (1×–8×), middle = reset zoom.
-- **LEDs:** `led[2:0]` = BFS busy/done/found, `led[5:3]` = Dijkstra, `led[8:6]` = A*, `led[14:12]` = DFS (dark when that engine isn't selected).
+- **LEDs:** `led[2:0]` = BFS busy/done/found, `led[5:3]` = Dijkstra, `led[8:6]` = A*, `led[14:12]` = DFS (dark when that engine isn't selected, and in GAME mode).
 
-**[T2: default] VGA:** 1920×1080 @ 60 Hz, 148.5 MHz pixel clock (§2), RGB444, active-high syncs. EDIT mode: one grid of 90 px square cells (1440×1080, centred), help text in the left margin. RUN mode: 2×2 quadrants of 960×540 (BFS, Dijkstra, A*, DFS); 45 px cells at 1×, and all four quadrants share one zoom/pan view. An unselected engine's quadrant shows only the maze, with a grey header. The legend is a half-size text strip in the DFS quadrant's right margin (outside the grid at 1×).
+**[T2: default] VGA:** 1920×1080 @ 60 Hz, 148.5 MHz pixel clock (§2), RGB444, active-high syncs. EDIT mode: one grid of 90 px square cells (1440×1080, centred), help text in the left margin. RUN mode: 2×2 quadrants of 960×540 (BFS, Dijkstra, A*, DFS); 45 px cells at 1×, and all four quadrants share one zoom/pan view. An unselected engine's quadrant shows only the maze, with a grey header. The legend is a half-size text strip in the DFS quadrant's right margin (outside the grid at 1×). GAME mode: the EDIT layout in the Pac-Man look with pellets, Pac-Man (mouth facing his direction) and the ghosts (red, pink, cyan, orange; ghosts sharing a cell are drawn split in half); left margin LEVEL / ALGO / LIVES / SCORE / PELLETS, right margin the game message (READY, PAUSED, CAUGHT, LEVEL CLEAR, GAME OVER, YOU WIN, NO PATH); no zoom.
 
 ## 10. Verification rules [T1 minimum]
 
@@ -316,6 +320,7 @@ The code already in the repo predates this contract. These changes bring it into
 - [x] `ip/`: add Digilent `MouseCtl.vhd` **and its dependency `Ps2Interface.vhd`**. Both are now in `arena/ip/`; `MouseCtl` moved from the old GPT5 lab, which has been removed.
 - [ ] Create `arena_top.v` with every XDC port; instantiate `clk_div` as `u_oled_clk` and uncomment the `create_generated_clock` line in the XDC.
 - [ ] `maze_ram`, maze generator, mouse interface, VGA, OLED dashboard, `sys_ctrl`.
+- [x] v1.7: GAME mode (`game_*`, `sys_ctrl.hold`, `arena_top` muxes, `vga_render` game view) and the OLED timing screen (`oled_screen`, `oled_stats` gap/order outputs), with `tb_game_step`, `tb_game_board`, `tb_game_player`, `tb_game_ghosts`, `tb_game_targets`, `tb_game_ctrl`, `tb_oled_screen`; `tb_arena_top`, `tb_vga_render`, `tb_sys_ctrl`, `tb_oled_stats` extended.
 
 ---
 
@@ -329,3 +334,4 @@ The code already in the repo predates this contract. These changes bring it into
 | 1.4 | 2026-11-01 | §1: shared Vivado project `pathfinder.xpr` added at the repo root (sources referenced from `arena/`, not copied); `docs/` listed. No Tier-1 interface changes. |
 | 1.5 | 2026-11-04 | §2: second clock exception, `clk_pix` 148.5 MHz (MMCM) for 1920×1080 VGA. `arena_defs.vh`: `ARENA_VGA_H/V` = 1920/1080, `ARENA_PIX_CLK_HZ` replaces `ARENA_PIX_TICK_DIV`. §4.2: `cell_rd_addr` now driven from `clk_pix` (no engine change). §9 defaults: 1080p layout, wheel zoom, middle-click reset, `sw[2]` Pac-Man theme. Also gives a version to the 2026-11-02 change-process edit in §0, which had none. |
 | 1.6 | 2026-11-04 | **Tier-1:** fourth engine `dfs_engine` (M2, `m2_astar/`; written 2026-11-02 as "1.5" on a branch, renumbered when merged after the 1080p v1.5). §4/§4.3/§4.5: DFS port list, metric and path rules (any valid path, fixed U/D/L/R order). §5: `dfs_` prefix group and `u_dfs` instance in `pathfind_top`. §8: four OLED rows. §9: `led[14:12]` = DFS status (was M2 debug); VGA RUN bottom-right quadrant = DFS (was the legend; the legend is now a half-size strip in that quadrant's right margin). §10.3: DFS cross-check rules. `arena_defs.vh`: `ARENA_ENG_DFS`. §5: `run_mask[3:0]` shared input (per-engine start gate). §7/§9: `sw[5:2]` engine selection, DONE = all selected engines done; the Pac-Man theme switch moves from `sw[2]` to `sw[6]`. §8: OLED shows finish place (rule in §8) and decimal values. M1 (`pathfind_top`) and M3 (`arena_top`, `sys_ctrl`, `vga_render`, `oled_dashboard`) files updated by M2 per §0. |
+| 1.7 | 2026-11-04 | **Tier-1:** §9: `btnU` is the reset only in demo mode; in GAME mode (`sw[6]` = 1) it is "up" and never resets. `sw[6]` = GAME mode; the VGA theme moves to `sw[7]`. §7: GAME mode description (`game_ctrl` drives the engines through the unchanged §4 handshake, one engine at a time, and reads routes with `path_rd_addr`; `sys_ctrl` held in EDIT). §8: OLED screen = engine selection / ranked compute times in µs with the gap to the fastest / GAME score (`oled_screen`; `oled_stats` gains `gap_bcd` and `snap_order` outputs, existing ports unchanged so `m2_race_top` is unaffected). §9 controls, LEDs and VGA defaults for GAME. §8/§9: `sw[8]` OLED mirror of the VGA picture (`oled_map`). No change to the engines, `pathfind_top` or `common/`. |
