@@ -163,7 +163,7 @@ module astar_engine #(
     // -> LUTRAM reads -> relax.  Same cycle count; NB is always entered from
     // one of those two updates, so nb_v is always for the current cur/dir.
     wire               pw_take = (state == S_POP_WAIT) && os_pop_valid && !os_pop_empty;
-    wire               nw_adv  = step_en && (state == S_NB_WR) && os_ready;
+    wire               nw_adv  = step_en && (state == S_NB_WR) && (os_ready || !nb_imp_r);
     wire [INDEX_W-1:0] cur_nx  = pw_take ? os_pop_idx : cur;
     wire [1:0]         dir_nx  = pw_take ? 2'd0 : nw_adv ? dir + 1'b1 : dir;
     wire [INDEX_W-1:0] nb_v_nx;
@@ -213,7 +213,9 @@ module astar_engine #(
     wire seed_go   = step_en && (state == S_SEED) && os_ready;
     wire pop_got   = (state == S_POP_WAIT) && os_pop_valid;  // pop_valid includes step_en
     wire pop_fresh = pop_got && !os_pop_empty;              // a cell to expand
-    wire nb_go     = step_en && (state == S_NB_WR) && os_ready;
+    // Only an improving neighbour needs the open set, so the others don't wait
+    // for a re-sort still running after the last pop or push.
+    wire nb_go     = step_en && (state == S_NB_WR) && (os_ready || !nb_imp_r);
     wire nb_write  = nb_go && nb_imp_r;
     wire recon_go  = step_en && (state == S_RECON);
 
@@ -371,7 +373,7 @@ module astar_engine #(
                     state    <= S_NB_WR;
                 end
 
-                S_NB_WR: if (os_ready) begin               // relax/push done by nb_write
+                S_NB_WR: if (os_ready || !nb_imp_r) begin  // relax/push done by nb_write
                     dir   <= dir + 1'b1;
                     state <= S_NB;
                     if (dir == 2'd3)

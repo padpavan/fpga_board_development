@@ -4,6 +4,9 @@
 // run_sel (sw[5:2]) picks the engines; it is latched into run_mask when BTNC
 // starts a run (a run with nothing selected is ignored). DONE = every
 // selected engine is done.
+// hold = 1 (GAME mode owns the board, CONTRACT v1.7): a demo run is abandoned
+// (LOAD..DONE -> EDIT), and EDIT ignores buttons and mouse edits, so the maze
+// and the markers stay frozen.  A maze generation in progress still finishes.
 module sys_ctrl #(
     parameter NUM_CELLS=`ARENA_NUM_CELLS, parameter INDEX_W=`ARENA_INDEX_W,
     parameter COST_W=`ARENA_COST_W, parameter SPEED_W=23
@@ -16,6 +19,7 @@ module sys_ctrl #(
     input wire gen_busy, input wire gen_done,
     input wire [3:0] engines_done,   // {dfs, ast, dij, bfs}
     input wire [3:0] run_sel,        // {dfs, ast, dij, bfs} switches
+    input wire hold,                 // GAME mode: freeze the demo
     output reg gen_start, output reg gen_random,
     output reg maze_we, output reg [INDEX_W-1:0] maze_addr, output reg [COST_W-1:0] maze_data,
     output reg load_we, output reg [INDEX_W-1:0] load_addr,
@@ -40,7 +44,7 @@ module sys_ctrl #(
                   ((mode == M_PAUSE) && 1'b0);
         maze_we = 1'b0; maze_addr = mouse_idx; maze_data = `ARENA_COST_OPEN;
         gen_start = (mode == M_GEN_REQ);
-        if (mode == M_EDIT && (mouse_left || mouse_right) &&
+        if (mode == M_EDIT && !hold && (mouse_left || mouse_right) &&
             (mouse_idx != start_idx) && (mouse_idx != goal_idx)) begin
             maze_we = 1'b1;
             if (mouse_right) maze_data = `ARENA_COST_OPEN;
@@ -59,14 +63,16 @@ module sys_ctrl #(
         end else begin
             speed_count <= speed_count + 1'b1;
             if (mode != M_RUN || paused || speed_sel == 0 || speed_count == speed_limit) speed_count <= 0;
-            if (mode == M_EDIT && mouse_left) begin
+            if (mode == M_EDIT && !hold && mouse_left) begin
                 case (edit_tool)
                     2'b01: start_idx <= mouse_idx;
                     2'b10: goal_idx <= mouse_idx;
                     default: begin end
                 endcase
             end
-            case (mode)
+            if (hold && mode != M_GEN_REQ && mode != M_GEN) begin
+                mode <= M_EDIT; paused <= 1'b0;
+            end else case (mode)
                 M_GEN_REQ: mode <= M_GEN;
                 M_GEN: if (!gen_busy && gen_done) mode <= M_EDIT;
                 M_EDIT: begin

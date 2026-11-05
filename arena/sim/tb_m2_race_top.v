@@ -235,9 +235,9 @@ module tb_m2_race_top;
 
         race(4'b1111, "open",     "sim/mazes/open.ast.expect",     "sim/mazes/open.dfs.expect",     1);
         for (e = 0; e < 4; e = e + 1) open_cyc[e] = cyc_of(e);
-        // open maze places are dfs 1, bfs 2, dij 3, a* 4
+        // open maze places are dfs 1, a* 2, bfs 3, dij 4
         read_display(v);
-        if (v !== 16'h1432) fail("open maze places != DFS1 A*4 DIJ3 BFS2");
+        if (v !== 16'h1243) fail("open maze places != DFS1 A*2 DIJ4 BFS3");
 
         set_sw({sw[15:2], 2'd1});               // weighted
         wait_fill;

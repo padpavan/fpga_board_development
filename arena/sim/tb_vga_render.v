@@ -3,6 +3,7 @@
 // vga_render + vga_timing: pixel-exact checks through the 4-cycle pipeline.
 // Frame 0: RUN classic, zoom 1x.  Frame 1: RUN Pac-Man, 1x.
 // Frame 2: EDIT classic.          Frame 3: RUN classic, 2x zoom at the origin.
+// Frame 4: RUN, DFS deselected.   Frame 5: GAME (EDIT layout, Pac-Man look).
 module tb_vga_render;
  localparam FRAC=20, OW=28, KW=16;
  localparam K1=(1048576+22)/45, K2=(1048576+45)/90;
@@ -15,6 +16,9 @@ module tb_vga_render;
  reg signed [OW-1:0] ox=-(120*K1), oy=0; reg [KW-1:0] k=K1; reg [2:0] level=0;
  reg [11:0] mx=12'd1900, my=12'd1070; reg [7:0] cursor_idx=0, start_idx=0, goal_idx=191;
  reg [7:0] bfs_cur=17, dij_cur=255, ast_cur=255, dfs_cur=255; reg [1:0] tool=0; reg [3:0] run_mask=4'b1111;
+ reg game=0; reg [3:0] gstate=0; reg [7:0] ppos=0; reg [1:0] pdir=2'd2; reg [31:0] gpos=0;
+ reg [3:0] gpres=0; reg [191:0] pellet=0; reg [1:0] glevel=0, galgo=0, glives=3;
+ reg [19:0] gscore=0; reg [11:0] gpel=0;
  wire [7:0] a0,a1,a2,a3,a4; wire [3:0] r,g,b; wire hso, vso;
  reg [3:0] maze [0:191]; reg [1:0] bst [0:191], dst [0:191], ast [0:191], fst [0:191];
  function [3:0] rd; input [7:0] a; rd = (a < 192) ? maze[a] : 4'd0; endfunction
@@ -28,6 +32,8 @@ module tb_vga_render;
   .cell_addr(a0),.up_addr(a1),.dn_addr(a2),.lf_addr(a3),.rt_addr(a4),
   .cell_cost(rd(a0)),.up_cost(rd(a1)),.dn_cost(rd(a2)),.lf_cost(rd(a3)),.rt_cost(rd(a4)),
   .bfs_state(rs(a0,0)),.dij_state(rs(a0,1)),.ast_state(rs(a0,2)),.dfs_state(rs(a0,3)),
+  .game(game),.game_state(gstate),.player_pos(ppos),.player_dir(pdir),.ghost_pos(gpos),.ghost_present(gpres),
+  .pellet(pellet),.game_level(glevel),.game_algo(galgo),.game_lives(glives),.game_score(gscore),.game_pellets(gpel),
   .red(r),.green(g),.blue(b),.hsync(hso),.vsync(vso));
 
  // (x, y) of the pixel now at the outputs (4-cycle latency)
@@ -108,7 +114,8 @@ module tb_vga_render;
   probe(6, 1000, 800, 12'hFFF);        // crosshair centre
   probe(7, 1005, 800, 12'hFFF);        // crosshair arm
   probe(8, 1000, 820, 12'h000);        // beyond the arm: open cell
-  n=9; run_frame;
+  probe(9, 33, 129, 12'hFFF);          // 'W' of SW7 (theme switch)
+  n=10; run_frame;
 
   // ---- frame 3: RUN classic, 2x zoom, view origin at cell (0,0)
   edit_mode=0; cursor_valid=0; mx=1900; my=1070; ox=0; oy=0; k=K2; level=1;
@@ -125,7 +132,33 @@ module tb_vga_render;
   probe(2, 187, 22, 12'h25C);          // BFS overlay unaffected
   n=3; run_frame;
 
-  if(errors==0 && checks==41) $display("PASS: tb_vga_render errors=0 checks=%0d",checks);
+  // ---- frame 5: GAME, READY.  EDIT geometry: cell (r,c) at (240+90c, 90r).
+  // Pac-Man on cell 18 facing up, ghost 0 on 20, ghost 1 on 21, pellet on 19.
+  edit_mode=1; game=1; pacman=0; cursor_valid=1; cursor_idx=136; mx=1000; my=800;
+  gstate=4'd2; ppos=18; pdir=2'd0; gpos={8'd23, 8'd0, 8'd21, 8'd20}; gpres=4'b1011;
+  pellet=0; pellet[19]=1'b1; glevel=1; galgo=2; glives=3; gscore=20'h01230; gpel=12'h042;
+  probe(0, 555, 135, 12'hFCA);         // pellet, centre of cell 19
+  probe(1, 825, 135, 12'h000);         // cell 22: no pellet
+  probe(2, 465, 105, 12'h000);         // above Pac-Man's centre: the mouth (facing up)
+  probe(3, 495, 135, 12'hFF0);         // right of centre: body (would be mouth facing right)
+  probe(4, 645, 160, 12'hF00);         // ghost 0 body, red
+  probe(5, 735, 160, 12'hF8C);         // ghost 1 body, pink
+  probe(6, 1, 33, 12'hFFF);            // 'L' of LEVEL
+  probe(7, 5, 65, 12'hFFF);            // level digit '2'
+  probe(8, 5, 161, 12'h0F0);           // algo 'A' of A*, A* green
+  probe(9, 1681, 65, 12'hFF0);         // 'R' of READY, yellow, right margin
+  probe(10, 1000, 800, 12'h000);       // no crosshair / hover in the game
+  probe(11, 5, 353, 12'hFFF);          // score first digit '0'
+  probe(12, 915, 160, 12'hFA0);        // ghost 3 body, orange (cell 23)
+  n=13; run_frame;
+
+  // ---- frame 6: ghosts 0 and 1 share cell 20 -> drawn split (left red, right pink)
+  gpos={8'd23, 8'd0, 8'd20, 8'd20};
+  probe(0, 620, 160, 12'hF00);         // left half: ghost 0
+  probe(1, 670, 160, 12'hF8C);         // right half: ghost 1
+  n=2; run_frame;
+
+  if(errors==0 && checks==57) $display("PASS: tb_vga_render errors=0 checks=%0d",checks);
   else $display("FAIL: tb_vga_render errors=%0d checks=%0d",errors,checks);
   $finish;
  end
