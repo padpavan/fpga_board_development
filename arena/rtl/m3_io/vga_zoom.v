@@ -1,16 +1,21 @@
 `timescale 1ns / 1ps
 `include "arena_defs.vh"
-// Scroll-wheel zoom for the RUN view (the three algorithm quadrants share it).
+// Scroll-wheel zoom for the RUN view, one view per quadrant (CONTRACT 9, v1.10).
 //
-// The view is (ox, oy, k): grid position (in cells, FRAC-bit fixed point) of a
-// quadrant's top-left pixel, and k = cells per screen pixel.  Zoom level L
-// magnifies by L+1, so k = 1 / (CELL * (L+1)).
+// Each quadrant q (0 BFS, 1 Dijkstra, 2 A*, 3 DFS, i.e. {bottom, right}) has
+// its own view (ox[q], oy[q], level[q]): the grid position (in cells, FRAC-bit
+// fixed point) of the quadrant's top-left pixel, and the zoom level.  Level L
+// magnifies by L+1, so k[q] = 1 / (CELL * (L+1)) cells per screen pixel.
 //
-// One wheel notch changes L by one, keeping the grid point under the cursor
-// still:  ox' = ox + mx * (k - k'),  mx = cursor x inside its quadrant.
+// Left click (RUN view only) selects the quadrant under the cursor.  The wheel
+// then zooms only the selected quadrant, one level per notch, keeping the grid
+// point under the cursor still:
+//     ox' = ox + mx * (k - k'),   mx = cursor x inside its quadrant.
 // The result is clamped so the view never leaves the grid's level-0 framing;
-// level 0 always returns to the default centred view.  Middle click resets.
-// Scrolling is ignored in EDIT mode (enable = 0).
+// level 0 always returns to the default centred view.  Middle click resets the
+// selected quadrant (all four if none is selected).  Before the first click no
+// quadrant is selected and the wheel does nothing.  Clicks and the wheel are
+// ignored in EDIT / GAME (enable = 0); rst clears every view and the selection.
 module vga_zoom #(
     parameter COLS=`ARENA_COLS, parameter ROWS=`ARENA_ROWS,
     parameter H_VISIBLE=`ARENA_VGA_H, parameter V_VISIBLE=`ARENA_VGA_V,
@@ -18,11 +23,14 @@ module vga_zoom #(
     parameter ZOOM_IN_NEG=1      // 1: negative wheel delta (wheel pushed away) zooms in
 ) (
     input  wire clk, input wire rst, input wire enable,
-    input  wire new_event, input wire [3:0] zpos, input wire middle,
+    input  wire new_event, input wire [3:0] zpos, input wire middle, input wire left,
     input  wire [11:0] mouse_x, input wire [11:0] mouse_y,
-    output reg  signed [OW-1:0] ox, output reg signed [OW-1:0] oy,
-    output wire [KW-1:0] k,
-    output reg  [2:0] level
+    output wire [4*OW-1:0] ox,         // per quadrant, quadrant q at [q*OW +: OW] (signed)
+    output wire [4*OW-1:0] oy,
+    output wire [4*KW-1:0] k,
+    output wire [4*3-1:0]  level,
+    output reg  [1:0]      sel = 2'd0, // selected quadrant
+    output reg             sel_valid = 1'b0
 );
     localparam QUAD_W = H_VISIBLE/2, QUAD_H = V_VISIBLE/2;
     localparam CELL_X = QUAD_W/COLS, CELL_Y = QUAD_H/ROWS;
@@ -66,41 +74,64 @@ module vga_zoom #(
         endcase
     endfunction
 
-    assign k = k_of(level);
+    // the four views
+    reg signed [OW-1:0] vox [0:3];
+    reg signed [OW-1:0] voy [0:3];
+    reg        [2:0]    vlev[0:3];
+    genvar q;
+    generate for (q = 0; q < 4; q = q + 1) begin : g_out
+        assign ox[q*OW +: OW]  = vox[q];
+        assign oy[q*OW +: OW]  = voy[q];
+        assign level[q*3 +: 3] = vlev[q];
+        assign k[q*KW +: KW]   = k_of(vlev[q]);
+    end endgenerate
 
+    wire [2:0] cur_level = vlev[sel];
     wire z_neg = zpos[3];
     wire z_pos = !zpos[3] && (zpos != 4'd0);
     wire want_in  = ZOOM_IN_NEG ? z_neg : z_pos;
     wire want_out = ZOOM_IN_NEG ? z_pos : z_neg;
-    wire [2:0] up_level   = (level == 3'd7) ? level : level + 1'b1;
-    wire [2:0] down_level = (level == 3'd0) ? level : level - 1'b1;
+    wire [2:0] up_level   = (cur_level == 3'd7) ? cur_level : cur_level + 1'b1;
+    wire [2:0] down_level = (cur_level == 3'd0) ? cur_level : cur_level - 1'b1;
     wire [2:0] req_level  = want_in ? up_level : down_level;
+    wire [1:0] click_q    = {(mouse_y >= QUAD_H), (mouse_x >= QUAD_W)};
 
-    reg        middle_d;
-    reg [1:0]  st;                    // 0 idle, 1 multiply, 2 apply
+    reg        middle_d = 1'b0, left_d = 1'b0;
+    reg [1:0]  st = 2'd0;             // 0 idle, 1 multiply, 2 apply
     reg [2:0]  nlev;
     reg signed [12:0]   mx, my;       // cursor inside its quadrant
     reg signed [KW:0]   dk;           // k(level) - k(nlev)
     reg signed [OW-1:0] px, py;
-    wire signed [OW-1:0] nx = ox + px;
-    wire signed [OW-1:0] ny = oy + py;
+    wire signed [OW-1:0] nx = vox[sel] + px;
+    wire signed [OW-1:0] ny = voy[sel] + py;
     wire signed [OW-1:0] nx_max = ox_max(nlev);
     wire signed [OW-1:0] ny_max = oy_max(nlev);
 
+    integer i;
+    initial for (i = 0; i < 4; i = i + 1) begin vox[i] = OX0; voy[i] = OY0; vlev[i] = 3'd0; end
+
     always @(posedge clk) begin
         if (rst) begin
-            level <= 3'd0; ox <= OX0; oy <= OY0; st <= 2'd0; middle_d <= 1'b0;
+            for (i = 0; i < 4; i = i + 1) begin vox[i] <= OX0; voy[i] <= OY0; vlev[i] <= 3'd0; end
+            sel <= 2'd0; sel_valid <= 1'b0; st <= 2'd0; middle_d <= 1'b0; left_d <= 1'b0;
         end else begin
             middle_d <= middle;
+            left_d   <= left;
             case (st)
                 2'd0: begin
                     if (middle && !middle_d) begin
-                        level <= 3'd0; ox <= OX0; oy <= OY0;
-                    end else if (enable && new_event && (want_in || want_out) && (req_level != level)) begin
+                        for (i = 0; i < 4; i = i + 1)
+                            if (!sel_valid || sel == i) begin
+                                vox[i] <= OX0; voy[i] <= OY0; vlev[i] <= 3'd0;
+                            end
+                    end else if (enable && left && !left_d) begin
+                        sel <= click_q; sel_valid <= 1'b1;
+                    end else if (enable && sel_valid && new_event && (want_in || want_out) &&
+                                 (req_level != cur_level)) begin
                         nlev <= req_level;
                         mx <= (mouse_x >= QUAD_W) ? mouse_x - QUAD_W : mouse_x;
                         my <= (mouse_y >= QUAD_H) ? mouse_y - QUAD_H : mouse_y;
-                        dk <= $signed({1'b0, k_of(level)}) - $signed({1'b0, k_of(req_level)});
+                        dk <= $signed({1'b0, k_of(cur_level)}) - $signed({1'b0, k_of(req_level)});
                         st <= 2'd1;
                     end
                 end
@@ -110,12 +141,12 @@ module vga_zoom #(
                     st <= 2'd2;
                 end
                 default: begin
-                    if (nlev == 3'd0) begin ox <= OX0; oy <= OY0; end
+                    if (nlev == 3'd0) begin vox[sel] <= OX0; voy[sel] <= OY0; end
                     else begin
-                        ox <= (nx < OX0) ? OX0 : (nx > nx_max) ? nx_max : nx;
-                        oy <= (ny < OY0) ? OY0 : (ny > ny_max) ? ny_max : ny;
+                        vox[sel] <= (nx < OX0) ? OX0 : (nx > nx_max) ? nx_max : nx;
+                        voy[sel] <= (ny < OY0) ? OY0 : (ny > ny_max) ? ny_max : ny;
                     end
-                    level <= nlev;
+                    vlev[sel] <= nlev;
                     st <= 2'd0;
                 end
             endcase

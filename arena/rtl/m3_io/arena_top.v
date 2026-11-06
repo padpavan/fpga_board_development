@@ -14,6 +14,11 @@
 //         VGA picture as small maps (EDIT map / 4-engine race / game) via
 //         oled_map, which then owns the engines' cell_rd_addr and maze_ram's
 //         first VGA read port (the VGA overlay is wrong meanwhile).
+//   RUN view zoom (CONTRACT 9, v1.10): left click selects a quadrant (yellow
+//         border); the wheel zooms only that quadrant, middle click resets it.
+//   sw[11:9] (CONTRACT 8b, v1.10): OLED page.  000 automatic (as before),
+//         001 menu, 010 graph, 011 race results, 100 points, 101 algorithms.
+//         GAME always shows the score; the sw[8] mirror wins over every page.
 module arena_top #(
     parameter DEBOUNCE_LOCKOUT=20_000_000,
     parameter GEN_CELLS=`ARENA_NUM_CELLS,
@@ -230,15 +235,19 @@ module arena_top #(
         rst_pix   <= rst_pix_m;
     end
 
-    // scroll-wheel zoom of the RUN view (100 MHz domain, next to the mouse)
-    wire signed [OW-1:0] zoom_ox, zoom_oy;
-    wire [KW-1:0] zoom_k;
-    wire [2:0] zoom_level;
+    // scroll-wheel zoom of the RUN view, one view per quadrant (100 MHz domain,
+    // next to the mouse); left click selects the quadrant the wheel zooms
+    wire [4*OW-1:0] zoom_ox, zoom_oy;
+    wire [4*KW-1:0] zoom_k;
+    wire [4*3-1:0]  zoom_level;
+    wire [1:0]      zoom_sel;
+    wire            zoom_sel_valid;
     vga_zoom #(.FRAC(FRAC),.OW(OW),.KW(KW)) u_vga_zoom (
         .clk(clk),.rst(rst),.enable(!edit_mode && !game_go),
-        .new_event(mouse_event),.zpos(mouse_z),.middle(mouse_middle),
+        .new_event(mouse_event),.zpos(mouse_z),.middle(mouse_middle),.left(mouse_left),
         .mouse_x(mouse_x),.mouse_y(mouse_y),
-        .ox(zoom_ox),.oy(zoom_oy),.k(zoom_k),.level(zoom_level)
+        .ox(zoom_ox),.oy(zoom_oy),.k(zoom_k),.level(zoom_level),
+        .sel(zoom_sel),.sel_valid(zoom_sel_valid)
     );
 
     // everything the renderer needs from the 100 MHz side, moved across once per frame
@@ -259,8 +268,8 @@ module arena_top #(
     localparam GAME_W = 1 + 4 + INDEX_W + 2 + 4*INDEX_W + 4 + `ARENA_NUM_CELLS + 2 + 2 + 2 + 20 + 12;
     wire [GAME_W-1:0] game_view = {game_go, g_state, g_player, g_dir, g_ghosts, g_ghost_present,
         g_pellet, g_level, g_algo, g_lives, g_score_bcd, bcd3(g_pellets)};
-    localparam VIEW_W = 2*OW + KW + 3 + 12 + 12 + 1 + INDEX_W + 1 + 1 + 2 + 6*INDEX_W + 4 + GAME_W;
-    wire [VIEW_W-1:0] view_a = {zoom_ox, zoom_oy, zoom_k, zoom_level, mouse_x, mouse_y,
+    localparam VIEW_W = 4*(2*OW + KW + 3) + 3 + 12 + 12 + 1 + INDEX_W + 1 + 1 + 2 + 6*INDEX_W + 4 + GAME_W;
+    wire [VIEW_W-1:0] view_a = {zoom_ox, zoom_oy, zoom_k, zoom_level, zoom_sel, zoom_sel_valid, mouse_x, mouse_y,
         cursor_valid && !game_go, mouse_idx, edit_mode, sw_sync[7] || game_go, sw_sync[1:0],
         start_idx, goal_idx, bfs_current, dij_current, ast_current, dfs_current, run_mask, game_view};
     wire [VIEW_W-1:0] view_p;
@@ -269,9 +278,11 @@ module arena_top #(
         .clk_a(clk),.rst_a(rst),.din(view_a),
         .clk_b(clk_pix),.rst_b(rst_pix),.apply_b(view_tick),.dout(view_p)
     );
-    wire signed [OW-1:0] v_ox, v_oy;
-    wire [KW-1:0] v_k;
-    wire [2:0] v_level;
+    wire [4*OW-1:0] v_ox, v_oy;
+    wire [4*KW-1:0] v_k;
+    wire [4*3-1:0] v_level;
+    wire [1:0] v_zsel;
+    wire v_zsel_valid;
     wire [11:0] v_mouse_x, v_mouse_y;
     wire v_cursor_valid, v_edit, v_pacman;
     wire [1:0] v_tool;
@@ -280,7 +291,7 @@ module arena_top #(
     wire v_game; wire [3:0] v_gstate; wire [INDEX_W-1:0] v_player; wire [1:0] v_dir;
     wire [4*INDEX_W-1:0] v_ghosts; wire [3:0] v_gpresent; wire [`ARENA_NUM_CELLS-1:0] v_pellet;
     wire [1:0] v_glevel, v_galgo, v_glives; wire [19:0] v_gscore; wire [11:0] v_gpellets;
-    assign {v_ox, v_oy, v_k, v_level, v_mouse_x, v_mouse_y, v_cursor_valid, v_cursor_idx,
+    assign {v_ox, v_oy, v_k, v_level, v_zsel, v_zsel_valid, v_mouse_x, v_mouse_y, v_cursor_valid, v_cursor_idx,
             v_edit, v_pacman, v_tool, v_start, v_goal, v_bfs_cur, v_dij_cur, v_ast_cur,
             v_dfs_cur, v_run_mask,
             v_game, v_gstate, v_player, v_dir, v_ghosts, v_gpresent, v_pellet,
@@ -298,6 +309,7 @@ module arena_top #(
         .x(px),.y(py),.active_video(active_video),.hsync_in(hs),.vsync_in(vs),
         .edit_mode(v_edit),.pacman(v_pacman),
         .run_ox(v_ox),.run_oy(v_oy),.run_k(v_k),.zoom_level(v_level),
+        .zoom_sel(v_zsel),.zoom_sel_valid(v_zsel_valid),
         .mouse_x(v_mouse_x),.mouse_y(v_mouse_y),
         .cursor_valid(v_cursor_valid),.cursor_idx(v_cursor_idx),.edit_tool(v_tool),
         .start_idx(v_start),.goal_idx(v_goal),
@@ -345,11 +357,15 @@ module arena_top #(
     reg [1:0]  oled_view = 2'd0;
     reg [3:0]  oled_sel = 4'd0;
     reg [19:0] oled_score = 20'd0;
+    reg [2:0]  oled_page = 3'd0;     // sw[11:9]; 0 (automatic) in GAME
     always @(posedge clk) begin
         oled_view  <= game_go ? 2'd2 : (mode == 3'd0 || mode == 3'd1 || mode == 3'd7) ? 2'd0 : 2'd1;
         oled_sel   <= sw_sync[5:2];
         oled_score <= g_score_bcd;
+        oled_page  <= game_go ? 3'd0 : sw_sync[11:9];
     end
+    // page 011 shows oled_screen's ranked race results whatever the mode
+    wire [1:0] screen_view = (oled_page == 3'd3) ? 2'd1 : oled_view;
     wire clk6p25m;
     wire [12:0] oled_pixel_index;
     wire [15:0] oled_pixel_data;
@@ -394,7 +410,7 @@ module arena_top #(
     );
     wire [15:0] screen_px, map_px;
     oled_screen u_oled_screen (
-        .pixel_index(oled_pixel_index),.view(oled_view),.sel(oled_sel),
+        .pixel_index(oled_pixel_index),.view(screen_view),.sel(oled_sel),
         .snap_mask(snap_mask),.snap_status(snap_status),.snap_place(snap_place),
         .snap_order(snap_order),.cyc_bcd(cyc_bcd),.gap_bcd(gap_bcd),.score_bcd(oled_score),
         .pixel_data(screen_px)
@@ -418,7 +434,24 @@ module arena_top #(
         .snap_mask(snap_mask),.snap_status(snap_status),.snap_place(snap_place),
         .snap_order(snap_order),.cyc_bcd(cyc_bcd),.gap_bcd(gap_bcd)
     );
-    assign oled_pixel_data = oled_mirror ? map_px : (oled_view == 2'd1) ? plot_px : screen_px;
+    // menu, points leaderboard and algorithm pages (M1); the points count demo races
+    wire [15:0] menu_px;
+    gv_oled_menu u_gv_menu (
+        .clk(clk),.rst(rst),.start(start_search && !game_owns),.run_mask(run_mask),
+        .done({dfs_done,ast_done,dij_done,bfs_done}),.found({dfs_found,ast_found,dij_found,bfs_found}),
+        .cycles({dfs_cycles,ast_cycles,dij_cycles,bfs_cycles}),
+        .page(oled_page),.pixel_index(oled_pixel_index),.pixel_data(menu_px)
+    );
+    reg [15:0] page_px;
+    always @* begin
+        case (oled_page)
+            3'd1, 3'd4, 3'd5: page_px = menu_px;                 // menu / points / algorithms
+            3'd2:             page_px = plot_px;                 // graph
+            3'd3:             page_px = screen_px;               // race results (view forced to 1)
+            default:          page_px = (oled_view == 2'd1) ? plot_px : screen_px;   // automatic
+        endcase
+    end
+    assign oled_pixel_data = oled_mirror ? map_px : page_px;
     Oled_Display u_oled (
         .clk(clk6p25m),.reset(oled_rst_sync),.frame_begin(),.sending_pixels(),.sample_pixel(),
         .pixel_index(oled_pixel_index),.pixel_data(oled_pixel_data),

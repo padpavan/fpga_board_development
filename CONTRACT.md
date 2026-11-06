@@ -1,6 +1,6 @@
 # CONTRACT.md: FPGA Pathfinding Arena (Group S1_18)
 
-**Version 1.9** · Basys 3 (xc7a35tcpg236-1) · Verilog-2001
+**Version 1.10** · Basys 3 (xc7a35tcpg236-1) · Verilog-2001
 
 This file is the integration contract for the three members' work. Read it fully **before** writing any project code, whether you're a human or an AI agent. It defines only what crosses a member boundary. Everything inside a member's own block is that member's choice.
 
@@ -296,6 +296,22 @@ An OLED plot of each engine's progress to the goal against time, on the demo res
 
 **[T2: default] Screen** (M1's choice, `m1_pathfind/gv_oled_plot`, the whole demo results view): 2 text lines above a 47 px plot (`y` = 62 − level, `x` = sample + 1, axes at `x` = 0 and `y` = 63). The fastest engine shows its time and the others `+x.xx` (µs), `RUN`, `NONE` (no path) or grey `OFF`, each in its engine's colour (BFS cyan, Dijkstra yellow, A* green, DFS pink; A* on top). A curve stops at its engine's finish, with a dotted line in its colour down to the x axis. Dotted grid at 50 % and 100 %; dim axis labels `100%`, `50` and `TIME>` behind the curves. `docs/reference/ast_oled_graph.v.txt` is an untested earlier draft M1 may use or ignore.
 
+## 8b. OLED pages [T2: M1's choice, switch codes T1 in §9]
+
+`sw[11:9]` picks the OLED page in demo mode; GAME always shows its score and the `sw[8]` mirror wins over every page. `arena_top` registers the code on `clk` and selects the pixel source; `m1_pathfind/gv_oled_menu` draws the menu, points and algorithm pages.
+
+| `sw[11:9]` | Page |
+|---|---|
+| 000 | Automatic, as before: engine selection in EDIT, the §8a graph during and after a run |
+| 001 | Menu: the page list with these codes |
+| 010 | §8a graph (`gv_oled_plot`), in any demo mode |
+| 011 | Race results: `oled_screen`'s ranked list (view 1), in any demo mode |
+| 100 | Points leaderboard |
+| 101 | Algorithms: one entry per engine |
+| 110, 111 | Automatic |
+
+**Points** (derived only from §4.3 signals, like §8's place): a demo race is scored when every engine selected for it is done. Engines that found a path are ranked by `cycles`: place = 1 + the number of other selected, found engines with fewer cycles (ties share a place). Places 1/2/3/4 earn 3/2/1/0 points; no path or not selected earns 0. The page shows each engine's total, ranked, and the number of races. `rst` (BTNU) clears it, and a race cut short never counts. Totals saturate at 999.
+
 ## 9. Top-level ports and pin ownership [T1]
 
 `arena_top` port names must match `arena/constraints/arena_basys3.xdc` exactly. **Every port listed in the XDC must exist in `arena_top`.** Tie unused outputs to a constant rather than deleting them, so Vivado doesn't warn about unmatched constraints.
@@ -305,7 +321,7 @@ An OLED plot of each engine's progress to the goal against time, on the demo res
 | `clk` | W5 | everyone (100 MHz) |
 | `btnU` | T18 | **reset** in demo mode (feeds `rst`); "up" in GAME mode (`sw[6]` = 1), where it does not reset |
 | `btnC`, `btnL`, `btnR`, `btnD` | U18, W19, T17, U17 | M3 (`sys_ctrl`) |
-| `sw[15:0]` | Basys 3 standard | M3; `sw[12:9]` reserved for M1/M2 debug |
+| `sw[15:0]` | Basys 3 standard | M3; `sw[11:9]` = M1 OLED page (§8b), `sw[12]` reserved for M1/M2 debug |
 | `led[8:0]` | | M3: engine status |
 | `led[11:9]` | | **M1 debug** (via `dbg_` ports) |
 | `led[14:12]` | | **M2**: DFS status `{found, done, busy}` |
@@ -318,11 +334,11 @@ An OLED plot of each engine's progress to the goal against time, on the demo res
 **[T2: default] Controls** (M3 may change; record in `m3_io/INTERFACE.md`):
 - **Buttons (demo):** BTNU = reset · BTNC = start run / confirm · BTNL = pause/resume · BTNR = clear maze · BTND = generate random maze.
 - **Buttons (GAME):** BTNU / BTND / BTNL / BTNR = up / down / left / right (Pac-Man style: a press sets the direction, he keeps moving and takes a queued turn at the first open cell) · BTNC = start level / pause-resume / next level / restart.
-- **Switches:** `sw[1:0]` = edit tool (00 wall, 01 start, 10 goal, 11 weight) · `sw[5:2]` = engines to run (`sw[2]` BFS, `sw[3]` Dijkstra, `sw[4]` A*, `sw[5]` DFS; in GAME, the levels cycle through the selected engines instead of the default DFS, Dijkstra, BFS, A*) · `sw[6]` = GAME mode · `sw[7]` = VGA theme in demo mode (0 classic, 1 Pac-Man; GAME is always Pac-Man) · `sw[8]` = OLED mirror of the VGA picture (testing without a monitor; see §8) · `sw[15:13]` = animation speed (000 = full speed … 111 = slowest).
-- **Mouse:** left = apply tool, right = erase, wheel = zoom the RUN view about the cursor (1×–8×), middle = reset zoom.
+- **Switches:** `sw[1:0]` = edit tool (00 wall, 01 start, 10 goal, 11 weight) · `sw[5:2]` = engines to run (`sw[2]` BFS, `sw[3]` Dijkstra, `sw[4]` A*, `sw[5]` DFS; in GAME, the levels cycle through the selected engines instead of the default DFS, Dijkstra, BFS, A*) · `sw[6]` = GAME mode · `sw[7]` = VGA theme in demo mode (0 classic, 1 Pac-Man; GAME is always Pac-Man) · `sw[8]` = OLED mirror of the VGA picture (testing without a monitor; see §8) · `sw[11:9]` = OLED page (§8b: 000 automatic, 001 menu, 010 graph, 011 race results, 100 points, 101 algorithms) · `sw[15:13]` = animation speed (000 = full speed … 111 = slowest).
+- **Mouse:** EDIT: left = apply tool, right = erase. RUN view: left = select the quadrant to zoom, wheel = zoom the selected quadrant about the cursor (1×–8×), middle = reset the selected quadrant (all four if none is selected). The wheel does nothing until a quadrant is selected; BTNU clears every zoom and the selection.
 - **LEDs:** `led[2:0]` = BFS busy/done/found, `led[5:3]` = Dijkstra, `led[8:6]` = A*, `led[14:12]` = DFS (dark when that engine isn't selected, and in GAME mode).
 
-**[T2: default] VGA:** 1920×1080 @ 60 Hz, 148.5 MHz pixel clock (§2), RGB444, active-high syncs. EDIT mode: one grid of 90 px square cells (1440×1080, centred), help text in the left margin. RUN mode: 2×2 quadrants of 960×540 (BFS, Dijkstra, A*, DFS); 45 px cells at 1×, and all four quadrants share one zoom/pan view. An unselected engine's quadrant shows only the maze, with a grey header. The legend is a half-size text strip in the DFS quadrant's right margin (outside the grid at 1×). GAME mode: the EDIT layout in the Pac-Man look with pellets, Pac-Man (mouth facing his direction) and the ghosts (red, pink, cyan, orange; ghosts sharing a cell are drawn split in half); left margin LEVEL / ALGO / LIVES / SCORE / PELLETS, right margin the game message (READY, PAUSED, CAUGHT, LEVEL CLEAR, GAME OVER, YOU WIN, NO PATH); no zoom.
+**[T2: default] VGA:** 1920×1080 @ 60 Hz, 148.5 MHz pixel clock (§2), RGB444, active-high syncs. EDIT mode: one grid of 90 px square cells (1440×1080, centred), help text in the left margin. RUN mode: 2×2 quadrants of 960×540 (BFS, Dijkstra, A*, DFS); 45 px cells at 1×, and each quadrant has its own zoom/pan view: a left click selects a quadrant (yellow border) and the wheel zooms only that one. An unselected engine's quadrant shows only the maze, with a grey header. The legend is a half-size text strip in the DFS quadrant's right margin (outside the grid at 1×). GAME mode: the EDIT layout in the Pac-Man look with pellets, Pac-Man (mouth facing his direction) and the ghosts (red, pink, cyan, orange; ghosts sharing a cell are drawn split in half); left margin LEVEL / ALGO / LIVES / SCORE / PELLETS, right margin the game message (READY, PAUSED, CAUGHT, LEVEL CLEAR, GAME OVER, YOU WIN, NO PATH); no zoom.
 
 ## 10. Verification rules [T1 minimum]
 
@@ -390,3 +406,4 @@ The code already in the repo predates this contract. These changes bring it into
 | 1.7 | 2026-11-04 | **Tier-1:** §9: `btnU` is the reset only in demo mode; in GAME mode (`sw[6]` = 1) it is "up" and never resets. `sw[6]` = GAME mode; the VGA theme moves to `sw[7]`. §7: GAME mode description (`game_ctrl` drives the engines through the unchanged §4 handshake, one engine at a time, and reads routes with `path_rd_addr`; `sys_ctrl` held in EDIT). §8: OLED screen = engine selection / ranked compute times in µs with the gap to the fastest / GAME score (`oled_screen`; `oled_stats` gains `gap_bcd` and `snap_order` outputs, existing ports unchanged so `m2_race_top` is unaffected). §9 controls, LEDs and VGA defaults for GAME. §8/§9: `sw[8]` OLED mirror of the VGA picture (`oled_map`). No change to the engines, `pathfind_top` or `common/`. |
 | 1.8 | 2026-11-05 | **Tier-1:** new §8a performance graph: sampler → graph interface (`hist_*`), rules and sampler inputs; M2 measures (`ast_perf_sampler`, committed as a stub with the agreed ports and tied-off outputs for M2 to fill in), M1 stores and plots (`gv_graph`, `gv_hist_ram`). `arena_defs.vh`: `ARENA_GV_ADDR_W/DATA_W/PLOG_W`. §1: new files, `gv_` prefix. §2: `gv_graph` / `gv_hist_ram` read side on `clk_pix`. §9: `sw[10:9]` graph screen, `sw[11]` graph metric (`sw[12]` stays reserved). `arena_top` (M3) wires the sampler, a second `vga_cdc` and the VGA screen mux, per §0. No change to the engines or `pathfind_top`. |
 | 1.9 | 2026-11-05 | **Tier-1:** §8a rewritten: the performance graph moves from a VGA screen to the OLED results view. The `hist_*` interface, `gv_graph`, `gv_hist_ram`, the second `vga_cdc` and the VGA mux are removed, and the "maze explored" metric is dropped. M2 now owns the history (`ast_perf_hist`, rotated addressing) and defines the metric exactly; M1 draws, with `oled_stats` supplying the timing labels. `arena_defs.vh`: `ARENA_GV_*` replaced by `ARENA_PG_*`. §1 and §2: `gv_*` removed. §8: exception for the graph. §9: `sw[11:9]` freed (`sw[12:9]` reserved). `arena_top` wires the sampler and history, read side unconnected until M1's renderer. Reference model: `<name>.perf.expect`, `<name>.perf.total`; `dijkstra()` now mirrors `dij_min_heap`'s pop order. No change to the engines or `pathfind_top`. |
+| 1.10 | 2026-11-06 | **Tier-1:** §9: `sw[11:9]` = OLED page (new §8b), `sw[12]` stays reserved. Mouse in the RUN view: left click selects a quadrant and the wheel zooms only that quadrant (each quadrant has its own view), middle click resets the selected one. `vga_zoom` (M1) keeps four views and the selection; `vga_render` and `arena_top` (M3) take one view per quadrant and draw the selection border, per §0. New §8b: OLED menu, race results, points leaderboard and algorithm pages (`gv_oled_menu`, M1). No change to the engines, `pathfind_top` or the §8a interface. |

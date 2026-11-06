@@ -7,7 +7,7 @@
 //
 //   `include "arena_defs.vh"
 //
-// Contract version: 1.9
+// Contract version: 1.10
 //////////////////////////////////////////////////////////////////////////////
 `ifndef ARENA_DEFS_VH
 `define ARENA_DEFS_VH
