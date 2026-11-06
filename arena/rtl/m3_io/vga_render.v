@@ -81,6 +81,9 @@ module vga_render #(
     localparam LEG_X0   = QUAD_W - 16*LEG_COLS;                                  // 848
     localparam NUM_CELLS = COLS*ROWS;
     localparam GRID_X1  = EDIT_X0 + COLS*EDIT_CELL;                              // 1680
+    // game message column starts past the maze border (9 px wide, BAND), so the
+    // text never paints over it; 7 characters still fit before x = 1920
+    localparam MSG_X0   = GRID_X1 + 16;                                          // 1696
     // game_ctrl states (game_ctrl.v)
     localparam [3:0] G_INIT = 4'd1, G_READY = 4'd2, G_PLAY = 4'd3, G_PAUSE = 4'd4, G_CAUGHT = 4'd5,
                      G_CLEAR = 4'd6, G_OVER = 4'd7, G_WIN = 4'd8, G_NOPATH = 4'd9, G_WAITENG = 4'd10;
@@ -244,7 +247,7 @@ module vga_render #(
     always @(posedge clk) begin
         xr_right <= (xn >= QUAD_W);
         xr_ledit <= (xn <  EDIT_X0);
-        xr_rm    <= (xn >= GRID_X1);
+        xr_rm    <= (xn >= MSG_X0);
         xr_leg   <= (xn >= QUAD_W + LEG_X0);
     end
     wire right  = xr_right;
@@ -257,7 +260,7 @@ module vga_render #(
     wire        legend = !edit_mode && c_bot && xr_leg;         // DFS quadrant, x >= 960+848
     wire [11:0] lgx = lx - LEG_X0;
     wire        rmargin = game && xr_rm;                    // game message column
-    wire [11:0] rx = x - GRID_X1;
+    wire [11:0] rx = x - MSG_X0;
     // 32 px text grid (glyph x4), or 16 px in the legend (glyph x2)
     wire [5:0]  t_line = legend ? ly[9:4]   : ly[10:5];
     wire [6:0]  t_char = legend ? lgx[10:4] : rmargin ? rx[11:5] : lx[11:5];

@@ -24,6 +24,7 @@ Owner-editable (Tier 2). Binding rules live in `/CONTRACT.md`.
 - EDIT: 90 px square cells, grid 1440×1080 centred (x 240..1679). Left margin shows `EDIT`, the tool, and the theme. `mouse_if` maps the cursor with the same layout.
 - RUN: quadrants 960×540, BFS / DIJKSTRA / A* / legend. At 1× the cells are 45 px (grid 720×540, 120 px side margins). The legend shows the zoom level.
 - A white crosshair marks the mouse in both modes.
+- GAME: the right-margin message starts at x = 1696, 16 px past the grid, so it clears the 9 px maze border.
 
 ## Zoom
 - Levels 1×–8× (`level` 0..7). One wheel notch changes the level by one, and the grid point under the cursor stays still (`ox' = ox + mx·(k − k')`, with `mx` the cursor position inside its quadrant).

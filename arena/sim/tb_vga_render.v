@@ -146,11 +146,12 @@ module tb_vga_render;
   probe(6, 1, 33, 12'hFFF);            // 'L' of LEVEL
   probe(7, 5, 65, 12'hFFF);            // level digit '2'
   probe(8, 5, 161, 12'h0F0);           // algo 'A' of A*, A* green
-  probe(9, 1681, 65, 12'hFF0);         // 'R' of READY, yellow, right margin
+  probe(9, 1697, 65, 12'hFF0);         // 'R' of READY, yellow, right margin
   probe(10, 1000, 800, 12'h000);       // no crosshair / hover in the game
   probe(11, 5, 353, 12'hFFF);          // score first digit '0'
   probe(12, 915, 160, 12'hFA0);        // ghost 3 body, orange (cell 23)
-  n=13; run_frame;
+  probe(13, 1681, 65, 12'h24F);        // maze border beside READY: text must not cover it
+  n=14; run_frame;
 
   // ---- frame 6: ghosts 0 and 1 share cell 20 -> drawn split (left red, right pink)
   gpos={8'd23, 8'd0, 8'd20, 8'd20};
@@ -158,7 +159,7 @@ module tb_vga_render;
   probe(1, 670, 160, 12'hF8C);         // right half: ghost 1
   n=2; run_frame;
 
-  if(errors==0 && checks==57) $display("PASS: tb_vga_render errors=0 checks=%0d",checks);
+  if(errors==0 && checks==58) $display("PASS: tb_vga_render errors=0 checks=%0d",checks);
   else $display("FAIL: tb_vga_render errors=%0d checks=%0d",errors,checks);
   $finish;
  end
