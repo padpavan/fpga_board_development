@@ -3,8 +3,9 @@
 // 1920x1080 renderer on clk_pix (148.5 MHz).
 //
 // EDIT: one grid of square cells, full height, centred; help text in the left margin.
-// RUN : 2x2 quadrants (BFS, Dijkstra, A*, DFS).  All four quadrants share one
-//       zoom/pan view (run_k, run_ox, run_oy from vga_zoom).  A quadrant whose
+// RUN : 2x2 quadrants (BFS, Dijkstra, A*, DFS).  Each quadrant has its own
+//       zoom/pan view (run_k, run_ox, run_oy from vga_zoom, one per quadrant);
+//       the quadrant selected for zooming (left click) gets a yellow border.  A quadrant whose
 //       engine is not in run_mask shows only the maze, with a grey header.
 //       The legend is a half-size text strip in the DFS quadrant's right
 //       margin (outside the grid at 1x; drawn over it when zoomed).
@@ -37,8 +38,10 @@ module vga_render #(
     input  wire hsync_in, input wire vsync_in,
     // view (from vga_cdc, changes only between frames)
     input  wire edit_mode, input wire pacman,
-    input  wire signed [OW-1:0] run_ox, input wire signed [OW-1:0] run_oy,
-    input  wire [KW-1:0] run_k, input wire [2:0] zoom_level,
+    // per quadrant q (0 BFS, 1 DIJ, 2 A*, 3 DFS) at [q*W +: W]; ox / oy are signed
+    input  wire [4*OW-1:0] run_ox, input wire [4*OW-1:0] run_oy,
+    input  wire [4*KW-1:0] run_k, input wire [4*3-1:0] zoom_level,
+    input  wire [1:0] zoom_sel, input wire zoom_sel_valid,
     input  wire [11:0] mouse_x, input wire [11:0] mouse_y,
     input  wire cursor_valid, input wire [INDEX_W-1:0] cursor_idx,
     input  wire [1:0] edit_tool,
@@ -103,21 +106,58 @@ module vga_render #(
                       P_GHOST1=12'hF8C, P_GHOST2=12'h0FF, P_GHOST3=12'hFA0;
 
     // ------------------------------------------------------------ DDA ------
-    wire [KW-1:0]       k_sel  = edit_mode ? EDIT_K  : run_k;
-    wire signed [OW-1:0] ox_sel = edit_mode ? EDIT_OX : run_ox;
-    wire signed [OW-1:0] oy_sel = edit_mode ? EDIT_OY : run_oy;
-    wire signed [OW-1:0] kx = {{(OW-KW){1'b0}}, k_sel};
-    reg  signed [OW-1:0] wx = 0, wy = 0;
-    wire signed [OW-1:0] wx_next = wx + kx;
-    wire signed [OW-1:0] wy_next = wy + kx;
+    // Each quadrant has its own view; EDIT / GAME use the fixed EDIT view everywhere.
+    wire signed [OW-1:0] ox0 = edit_mode ? EDIT_OX : run_ox[0*OW +: OW];
+    wire signed [OW-1:0] ox1 = edit_mode ? EDIT_OX : run_ox[1*OW +: OW];
+    wire signed [OW-1:0] ox2 = edit_mode ? EDIT_OX : run_ox[2*OW +: OW];
+    wire signed [OW-1:0] ox3 = edit_mode ? EDIT_OX : run_ox[3*OW +: OW];
+    wire signed [OW-1:0] oy0 = edit_mode ? EDIT_OY : run_oy[0*OW +: OW];
+    wire signed [OW-1:0] oy1 = edit_mode ? EDIT_OY : run_oy[1*OW +: OW];
+    wire signed [OW-1:0] oy2 = edit_mode ? EDIT_OY : run_oy[2*OW +: OW];
+    wire signed [OW-1:0] oy3 = edit_mode ? EDIT_OY : run_oy[3*OW +: OW];
+    wire [KW-1:0]        k0  = edit_mode ? EDIT_K  : run_k[0*KW +: KW];
+    wire [KW-1:0]        k1  = edit_mode ? EDIT_K  : run_k[1*KW +: KW];
+    wire [KW-1:0]        k2  = edit_mode ? EDIT_K  : run_k[2*KW +: KW];
+    wire [KW-1:0]        k3  = edit_mode ? EDIT_K  : run_k[3*KW +: KW];
     wire line_last   = (x == H_TOTAL-1);
     wire panel_x_end = !edit_mode && (x == QUAD_W-1);
     wire panel_y_end = !edit_mode && (y == QUAD_H-1);
+    // The view values are registered ahead of use (y only changes at a line end),
+    // so the DDA's load / step paths are as short as with a single view:
+    //   ox_l : left quadrant of the NEXT line (loaded into wx at the line end)
+    //   ox_r : right quadrant of this line   (loaded into wx at x = QUAD_W-1)
+    //   kl/kr: k of this row's left / right quadrant; kcur: k of the next pixel's quadrant
+    reg row_b = 1'b0, nrow_b = 1'b0;
+    reg signed [OW-1:0] ox_l = 0, ox_r = 0;
+    reg [KW-1:0] kl = 0, kr = 0, kcur = 0;
     always @(posedge clk) begin
-        if (line_last || panel_x_end) wx <= ox_sel; else wx <= wx_next;
+        row_b  <= (y >= QUAD_H);
+        nrow_b <= (y >= QUAD_H-1) && (y != V_TOTAL-1);
+        ox_l   <= nrow_b ? ox2 : ox0;
+        ox_r   <= row_b  ? ox3 : ox1;
+        kl     <= row_b  ? k2  : k0;
+        kr     <= row_b  ? k3  : k1;
+        kcur   <= ((x >= QUAD_W-1) && (x != H_TOTAL-1)) ? kr : kl;
+    end
+    wire signed [OW-1:0] kx = {{(OW-KW){1'b0}}, kcur};
+    reg  signed [OW-1:0] wx = 0, wy = 0;
+    // one row position per quadrant column of the current quadrant row; wy is the
+    // one for the pixel's quadrant (swapped in at the quadrant edges like wx)
+    reg  signed [OW-1:0] wy_l = 0, wy_r = 0;
+    wire signed [OW-1:0] wy_l_step = wy_l + {{(OW-KW){1'b0}}, kl};
+    wire signed [OW-1:0] wy_r_step = wy_r + {{(OW-KW){1'b0}}, kr};
+    wire signed [OW-1:0] wx_next = wx + kx;
+    wire signed [OW-1:0] wy_next = wy + kx;
+    always @(posedge clk) begin
+        if (line_last)        wx <= ox_l;
+        else if (panel_x_end) wx <= ox_r;
+        else                  wx <= wx_next;
         if (line_last) begin
-            if ((y == V_TOTAL-1) || panel_y_end) wy <= oy_sel; else wy <= wy_next;
-        end
+            if (y == V_TOTAL-1)    begin wy_l <= oy0; wy_r <= oy1; wy <= oy0; end
+            else if (panel_y_end)  begin wy_l <= oy2; wy_r <= oy3; wy <= oy2; end
+            else                   begin wy_l <= wy_l_step; wy_r <= wy_r_step; wy <= wy_l_step; end
+        end else if (panel_x_end)
+            wy <= wy_r;
     end
 
     reg [4:0] frame_cnt = 0;              // Pac-Man chomp animation
@@ -188,8 +228,8 @@ module vga_render #(
         T_PATH     = {"# PATH",              {18{8'h20}}},
         T_WEIGHT   = {"# WGHT",              {18{8'h20}}},
         T_ZOOM     = {"ZOOM X",              {18{8'h20}}},
+        T_CLICK    = {"CLICK +",             {17{8'h20}}},
         T_WHEEL    = {"WHEEL",               {19{8'h20}}},
-        T_ZOOMS    = {"ZOOMS",               {19{8'h20}}},
         T_MIDDLE   = {"MIDDLE",              {18{8'h20}}},
         T_RESET    = {"RESETS",              {18{8'h20}}},
         T_EDIT     = {"EDIT",                {20{8'h20}}},
@@ -271,6 +311,9 @@ module vga_render #(
                                       (panel == 2'd2) ? ast_current : dfs_current;
     wire view_on = run_mask[panel];
     wire sep = !edit_mode && ((x == QUAD_W-1) || (x == QUAD_W) || (y == QUAD_H-1) || (y == QUAD_H));
+    // 4 px yellow border inside the quadrant selected for zooming (RUN view only)
+    wire selb = !edit_mode && !game && zoom_sel_valid && (panel == zoom_sel) &&
+                ((lx < 4) || (lx >= QUAD_W-4) || (ly < 4) || (ly >= QUAD_H-4));
 
     wire [11:0] dxm = (x > mouse_x) ? x - mouse_x : mouse_x - x;
     wire [11:0] dym = ({1'b0, y} > mouse_y) ? {1'b0, y} - mouse_y : mouse_y - {1'b0, y};
@@ -378,8 +421,8 @@ module vga_render #(
             6'd7:  begin n_lg = T_PATH;     n_lgsw = 3'd3; end
             6'd8:  begin n_lg = T_WEIGHT;   n_lgsw = 3'd4; end
             6'd10: n_lg = T_ZOOM;
-            6'd12: n_lg = T_WHEEL;
-            6'd13: n_lg = T_ZOOMS;
+            6'd12: n_lg = T_CLICK;
+            6'd13: n_lg = T_WHEEL;
             6'd15: n_lg = T_MIDDLE;
             6'd16: n_lg = T_RESET;
             6'd18: n_lg = T_SW7;
@@ -420,7 +463,7 @@ module vga_render #(
     end
 
     reg               s1_active, s1_hs, s1_vs, s1_edit, s1_pac, s1_in_grid, s1_border, s1_grid;
-    reg               s1_sep, s1_cross, s1_start, s1_goal, s1_cur, s1_hover, s1_on;
+    reg               s1_sep, s1_cross, s1_start, s1_goal, s1_cur, s1_hover, s1_on, s1_selb;
     reg               s1_game, s1_player;
     reg [3:0]         s1_ghost;
     reg [1:0]         s1_panel, s1_tregion;
@@ -438,7 +481,7 @@ module vga_render #(
         s1_player <= game && in_grid && (idx == player_pos);
         s1_ghost  <= (game && in_grid) ? ghost_here : 4'b0000;
         s1_in_grid <= in_grid; s1_border <= ext_x && ext_y && !in_grid; s1_grid <= gridline;
-        s1_sep <= sep; s1_cross <= cross;
+        s1_sep <= sep; s1_cross <= cross; s1_selb <= selb;
         s1_fx <= fx; s1_fy <= fy;
         s1_dx <= $signed({1'b0, fx}) - 8'sd64;
         s1_dy <= $signed({1'b0, fy}) - 8'sd64;
@@ -465,9 +508,10 @@ module vga_render #(
 
     // ------------------------------------------------------------ S2 -------
 
+    wire [2:0] zl_sel = zoom_level[zoom_sel*3 +: 3];
     wire [7:0] t_raw = (s1_tchar < SL) ? s1_str[(SL-1-s1_tchar)*8 +: 8] : 8'h20;
     wire [7:0] t_ch  = (s1_tregion == 2'd3 && s1_tline == 6'd10 && s1_tchar == 7'd6) ?
-                       (8'd49 + zoom_level) : t_raw;     // zoom digit '1'..'8'
+                       (8'd49 + zl_sel) : t_raw;         // selected quadrant's zoom '1'..'8'
 
     // Pac-Man's mouth axis: forward offset (signed) and |sideways offset|
     // direction decoded once into registers (it changes only between frames)
@@ -483,7 +527,7 @@ module vga_render #(
 
     reg               s2_active, s2_hs, s2_vs, s2_edit, s2_pac, s2_in_grid, s2_border, s2_grid;
     reg               s2_sep, s2_cross, s2_start, s2_goal, s2_cur, s2_hover, s2_header_box;
-    reg               s2_on, s2_legend;
+    reg               s2_on, s2_legend, s2_selb;
     reg               s2_game, s2_player, s2_pellet;
     reg               s2_ghost;           // any ghost on this cell
     reg [11:0]        s2_gcolour;         // its colour (split in half when ghosts share)
@@ -501,6 +545,7 @@ module vga_render #(
         s2_edit <= s1_edit; s2_pac <= s1_pac; s2_panel <= s1_panel;
         s2_in_grid <= s1_in_grid; s2_border <= s1_border; s2_grid <= s1_grid;
         s2_sep <= s1_sep; s2_cross <= s1_cross; s2_start <= s1_start; s2_goal <= s1_goal;
+        s2_selb <= s1_selb;
         s2_cur <= s1_cur; s2_hover <= s1_hover; s2_on <= s1_on;
         s2_game <= s1_game; s2_player <= s1_player; s2_ghost <= |s1_ghost;
         // several ghosts on one cell: left half = lowest-numbered, right half = highest
@@ -593,6 +638,7 @@ module vga_render #(
 
         // everything except text: background layers
         if (s2_header_box)                      c = C_BLACK;
+        else if (s2_selb)                       c = C_HOVER;     // zoom-selected quadrant
         else if (s2_sep)                        c = C_SEP;
         else if (s2_legend)                     c = C_LEGEND_BG;
         else if (s2_in_grid)                    c = s2_pac ? c_pac : c_cls;   // GAME cells: S4

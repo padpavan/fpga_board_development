@@ -9,7 +9,7 @@ module tb_arena_top;
  wire oled_cs,oled_sdin,oled_sclk,oled_d_cn,oled_resn,oled_vccen,oled_pmoden;
  integer errors=0, timeout, hs_edges=0, rst_seen=0, gen_seen=0, wipe_seen=0, c;
  localparam HOLD=600;
- integer pg_count_before_game=0;
+ integer pg_count_before_game=0, races_before_wipe=0;
  always @(posedge clk) if (dut.rst === 1'b1) rst_seen = rst_seen + 1;
  always @(posedge clk) if (dut.gen_start === 1'b1) gen_seen = gen_seen + 1;
  always @(posedge clk) if (dut.wipe_pulse === 1'b1) wipe_seen = wipe_seen + 1;
@@ -179,16 +179,30 @@ module tb_arena_top;
   press(0); wait_mode(3'd6);
   if(dut.bfs_found!==1'b1 || dut.bfs_cost!==26 || dut.dij_cost!==26 || dut.ast_cost!==26) begin
    errors=errors+1; $display("FAIL: run after mid-run BTNR: bfs=%0d",dut.bfs_cost); end
+  // ---- per-quadrant zoom against BTNR: select DFS's quadrant, zoom one level, BTNR keeps both
+  force dut.mouse_x=12'd1200; force dut.mouse_y=12'd800;
+  force dut.mouse_left=1'b1; repeat(2) @(negedge clk); release dut.mouse_left; @(negedge clk);
+  force dut.mouse_z=4'hF; force dut.mouse_event=1'b1; @(negedge clk);
+  release dut.mouse_event; release dut.mouse_z; repeat(6) @(negedge clk);
+  release dut.mouse_x; release dut.mouse_y;
+  if(dut.zoom_sel_valid!==1'b1 || dut.zoom_sel!==2'd3 || dut.zoom_level[9 +: 3]!==3'd1) begin
+   errors=errors+1; $display("FAIL: quadrant zoom setup sel %0d level %0d",dut.zoom_sel,dut.zoom_level[9 +: 3]); end
   // ---- short BTNU from DONE: map wiped, markers home, engines clear, no full reset
   press(1); wait_mode(3'd0);
+  if(dut.zoom_sel_valid!==1'b1 || dut.zoom_level[9 +: 3]!==3'd1) begin errors=errors+1; $display("FAIL: BTNR lost the quadrant zoom"); end
   mouse_click(`ARENA_COLS+2,1'b0);                                    // wall still in 40 too
   sw[1:0]=2'b01; repeat(4) @(negedge clk); mouse_click(5,1'b0);       // start = 5
   sw[1:0]=2'b00; repeat(4) @(negedge clk);
   if(dut.start_idx!==5) begin errors=errors+1; $display("FAIL: start not moved"); end
   press(0); wait_mode(3'd6);
+  repeat(8) @(negedge clk); races_before_wipe = dut.u_gv_menu.races;
+  if(races_before_wipe==0) begin errors=errors+1; $display("FAIL: no races scored"); end
   rst_seen=0; gen_seen=0;
   press(2); wait_mode(3'd0);
   if(rst_seen!=0 || gen_seen!=1) begin errors=errors+1; $display("FAIL: short BTNU rst %0d gen %0d",rst_seen,gen_seen); end
+  // a wipe clears every zoom and the selection, but keeps the points (CONTRACT 8b, 9)
+  if(dut.zoom_sel_valid!==1'b0 || dut.zoom_level!==12'd0) begin errors=errors+1; $display("FAIL: wipe left a quadrant zoom"); end
+  if(dut.u_gv_menu.races!==races_before_wipe) begin errors=errors+1; $display("FAIL: wipe changed the points"); end
   if(dut.start_idx!==0 || dut.goal_idx!==`ARENA_NUM_CELLS-1) begin errors=errors+1; $display("FAIL: wipe markers"); end
   if(dut.bfs_done!==1'b0 || dut.dfs_done!==1'b0) begin errors=errors+1; $display("FAIL: wipe left engines done"); end
   check_all_open;
@@ -205,6 +219,7 @@ module tb_arena_top;
   repeat(10) @(negedge clk); wait_mode(3'd0);
   if(rst_seen!=1 || gen_seen!=1 || wipe_seen!=0) begin
    errors=errors+1; $display("FAIL: long BTNU rst %0d gen %0d wipe %0d",rst_seen,gen_seen,wipe_seen); end
+  if(dut.u_gv_menu.races!==10'd0) begin errors=errors+1; $display("FAIL: long BTNU kept the points"); end
   check_all_open;
   $display("  BTNU: short wipes without a reset, long gives one reset");
   if(errors==0) $display("PASS: tb_arena_top errors=0"); else $display("FAIL: tb_arena_top errors=%0d",errors);

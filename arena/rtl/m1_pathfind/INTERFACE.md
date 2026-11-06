@@ -53,3 +53,9 @@ M2 measures and stores (`ast_perf_sampler`, `ast_perf_hist`); M1 draws with `gv_
 - 2026-10-23: `cell_state` is cleared to UNSEEN progressively during the 192-cycle clear loop rather than in one cycle. Old states can show for ≤ 2 µs after a start, which is invisible on VGA.
 - 2026-10-23: `cell_state` codes: BFS writes FRONTIER on enqueue, VISITED on pop, PATH during reconstruction. Dijkstra writes FRONTIER on the start cell and on every improving relax, VISITED on settle, PATH during reconstruction.
 - 2026-10-23: `start` is sampled as a level in IDLE (no edge detector). The controller must send a 1-cycle pulse, as §4.1 says.
+
+## OLED pages and per-quadrant zoom (CONTRACT §8b / §9, v1.10)
+- `gv_oled_menu` draws the `sw[11:9]` pages 001 menu, 100 points and 101 algorithms (16 × 8 characters, 5×7 font with constant-slice lookups). `arena_top` picks the page; 000 keeps the old automatic screens, 010 is `gv_oled_plot`, 011 is `oled_screen`'s results list.
+- Points live in `gv_oled_menu` on `clk`: armed by the demo start pulse with that race's `run_mask`, scored the cycle every selected engine is done. Stage 1 counts, for each engine, the selected found engines with fewer cycles; stage 2 adds 3/2/1/0 (0 for no path). A second register stage ranks the totals (ties: lower engine id first) and converts them to BCD for the pixel side.
+- `vga_zoom` (M1, in `m3_io/`) keeps four views (`ox`, `oy`, `level` per quadrant) and the selected quadrant. Left click selects; the wheel zooms the selected one with the same cursor-anchored maths; middle click resets it (all four if none is selected).
+- Benches: `tb_gv_oled_menu` (points rules: full race, subset, tie, no path, unfinished race, BTNU; page pixels; frame dumps `oled_menu_*.hex`), `tb_vga_zoom` (selection, per-quadrant levels, clamping, resets).

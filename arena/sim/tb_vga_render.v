@@ -4,6 +4,7 @@
 // Frame 0: RUN classic, zoom 1x.  Frame 1: RUN Pac-Man, 1x.
 // Frame 2: EDIT classic.          Frame 3: RUN classic, 2x zoom at the origin.
 // Frame 4: RUN, DFS deselected.   Frame 5: GAME (EDIT layout, Pac-Man look).
+// Frame 6: GAME, ghosts sharing.   Frame 7: RUN, only BFS zoomed 2x and selected.
 module tb_vga_render;
  localparam FRAC=20, OW=28, KW=16;
  localparam K1=(1048576+22)/45, K2=(1048576+45)/90;
@@ -14,6 +15,13 @@ module tb_vga_render;
 
  reg edit_mode=0, pacman=0, cursor_valid=0;
  reg signed [OW-1:0] ox=-(120*K1), oy=0; reg [KW-1:0] k=K1; reg [2:0] level=0;
+ // per-quadrant views: q1..q3 use ox/oy/k/level; q0 (BFS) uses its own when split=1
+ reg split=0; reg signed [OW-1:0] ox_b=0, oy_b=0; reg [KW-1:0] k_b=K1; reg [2:0] level_b=0;
+ reg [1:0] zsel=0; reg zsel_valid=0;
+ wire [4*OW-1:0] ox_bus = {ox, ox, ox, split ? ox_b : ox};
+ wire [4*OW-1:0] oy_bus = {oy, oy, oy, split ? oy_b : oy};
+ wire [4*KW-1:0] k_bus  = {k, k, k, split ? k_b : k};
+ wire [4*3-1:0]  lv_bus = {level, level, level, split ? level_b : level};
  reg [11:0] mx=12'd1900, my=12'd1070; reg [7:0] cursor_idx=0, start_idx=0, goal_idx=191;
  reg [7:0] bfs_cur=17, dij_cur=255, ast_cur=255, dfs_cur=255; reg [1:0] tool=0; reg [3:0] run_mask=4'b1111;
  reg game=0; reg [3:0] gstate=0; reg [7:0] ppos=0; reg [1:0] pdir=2'd2; reg [31:0] gpos=0;
@@ -25,7 +33,8 @@ module tb_vga_render;
  function [1:0] rs; input [7:0] a; input integer e;
   rs = (a >= 192) ? 2'd0 : (e==0) ? bst[a] : (e==1) ? dst[a] : (e==2) ? ast[a] : fst[a]; endfunction
  vga_render dut(.clk(clk),.rst(rst),.x(x),.y(y),.active_video(av),.hsync_in(hs),.vsync_in(vs),
-  .edit_mode(edit_mode),.pacman(pacman),.run_ox(ox),.run_oy(oy),.run_k(k),.zoom_level(level),
+  .edit_mode(edit_mode),.pacman(pacman),.run_ox(ox_bus),.run_oy(oy_bus),.run_k(k_bus),.zoom_level(lv_bus),
+  .zoom_sel(zsel),.zoom_sel_valid(zsel_valid),
   .mouse_x(mx),.mouse_y(my),.cursor_valid(cursor_valid),.cursor_idx(cursor_idx),.edit_tool(tool),
   .start_idx(start_idx),.goal_idx(goal_idx),.bfs_current(bfs_cur),.dij_current(dij_cur),.ast_current(ast_cur),
   .dfs_current(dfs_cur),.run_mask(run_mask),
@@ -159,7 +168,22 @@ module tb_vga_render;
   probe(1, 670, 160, 12'hF8C);         // right half: ghost 1
   n=2; run_frame;
 
-  if(errors==0 && checks==58) $display("PASS: tb_vga_render errors=0 checks=%0d",checks);
+  // ---- frame 7: RUN classic, only BFS zoomed (2x at the origin) and selected;
+  // the other three quadrants stay at 1x, so each quadrant uses its own view
+  edit_mode=0; game=0; gpres=0; cursor_valid=0; mx=1900; my=1070;
+  ox=-(120*K1); oy=0; k=K1; level=0;
+  split=1; ox_b=0; oy_b=0; k_b=K2; level_b=1; zsel=0; zsel_valid=1; run_mask=4'b1111;
+  probe(0, 135, 45, 12'h25C);          // BFS cell 1 at 2x (90 px cells)
+  probe(1, 960+120+90+22, 40, 12'hFF0);// DIJ cell 2 path, still 1x (same row as BFS)
+  probe(2, 592, 570, 12'hFC0);         // A* cell 10 frontier at 1x (below the zoomed BFS)
+  probe(3, 960+120+22, 540+67, 12'hF6A); // DFS cell 16 path at 1x
+  probe(4, 2, 300, 12'hFF0);           // selection border, BFS left edge
+  probe(5, 957, 300, 12'hFF0);         // selection border, BFS right edge
+  probe(6, 963, 300, 12'h000);         // DIJ not selected: no border
+  probe(7, 1904+2, 540+160, 12'hFFF);  // legend shows the selected quadrant's zoom '2'
+  n=8; run_frame;
+
+  if(errors==0 && checks==66) $display("PASS: tb_vga_render errors=0 checks=%0d",checks);
   else $display("FAIL: tb_vga_render errors=%0d checks=%0d",errors,checks);
   $finish;
  end

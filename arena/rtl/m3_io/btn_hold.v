@@ -1,6 +1,6 @@
 `timescale 1ns / 1ps
 `include "arena_defs.vh"
-// Splits one button into a short press and a long hold (CONTRACT v1.10).
+// Splits one button into a short press and a long hold (CONTRACT v1.11).
 //
 // press_pulse comes from the button's common/debounce_btn, which starts the
 // timer.  debounce_btn has no level output, so the release is read from this
