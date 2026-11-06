@@ -4,9 +4,10 @@
 //
 // Two modes (CONTRACT 9, v1.7):
 //   demo (sw[6] = 0): edit a maze, race the selected engines (sw[5:2]), OLED
-//         shows the engines' compute times.  BTNU = reset.
+//         shows the engines' compute times.  BTNU short press = wipe the map,
+//         BTNU held 3 s = full reset, BTNR = back to EDIT with the maze intact.
 //   GAME (sw[6] = 1): game_ctrl takes the engines, the maze and the buttons
-//         (BTNU/D/L/R steer Pac-Man, BTNC start/pause); BTNU is not a reset.
+//         (BTNU/D/L/R steer Pac-Man, BTNC start/pause); BTNU never wipes or resets.
 //         sys_ctrl is held in EDIT.  The game starts once the demo is in EDIT
 //         and no engine is busy, and it keeps the engines until its last
 //         search has finished after sw[6] goes off.
@@ -16,6 +17,7 @@
 //         first VGA read port (the VGA overlay is wrong meanwhile).
 module arena_top #(
     parameter DEBOUNCE_LOCKOUT=20_000_000,
+    parameter RESET_HOLD_CYCLES=3*`ARENA_CLK_HZ, // BTNU hold for a full reset (3 s); small in simulation
     parameter GEN_CELLS=`ARENA_NUM_CELLS,
     parameter OLED_SNAP_DIV=`ARENA_CLK_HZ/10,    // OLED stats refresh (10 Hz); small in simulation
     parameter GAME_MS=`ARENA_CLK_HZ/1000         // game timing unit (1 ms); small in simulation
@@ -33,11 +35,11 @@ module arena_top #(
 );
     localparam INDEX_W=`ARENA_INDEX_W, COST_W=`ARENA_COST_W,
                DIST_W=`ARENA_DIST_W, CNT_W=`ARENA_CNT_W;
-    wire rst, up_pulse, run_pulse, pause_pulse, clear_pulse, random_pulse;
-    debounce_btn #(.LOCKOUT(DEBOUNCE_LOCKOUT)) u_db_rst (.CLOCK(clk),.btn(btnU),.press_pulse(up_pulse));
+    wire rst, up_pulse, run_pulse, pause_pulse, back_pulse, random_pulse;
+    debounce_btn #(.LOCKOUT(DEBOUNCE_LOCKOUT)) u_db_up (.CLOCK(clk),.btn(btnU),.press_pulse(up_pulse));
     debounce_btn #(.LOCKOUT(DEBOUNCE_LOCKOUT)) u_db_run (.CLOCK(clk),.btn(btnC),.press_pulse(run_pulse));
     debounce_btn #(.LOCKOUT(DEBOUNCE_LOCKOUT)) u_db_pause (.CLOCK(clk),.btn(btnL),.press_pulse(pause_pulse));
-    debounce_btn #(.LOCKOUT(DEBOUNCE_LOCKOUT)) u_db_clear (.CLOCK(clk),.btn(btnR),.press_pulse(clear_pulse));
+    debounce_btn #(.LOCKOUT(DEBOUNCE_LOCKOUT)) u_db_back (.CLOCK(clk),.btn(btnR),.press_pulse(back_pulse));
     debounce_btn #(.LOCKOUT(DEBOUNCE_LOCKOUT)) u_db_random (.CLOCK(clk),.btn(btnD),.press_pulse(random_pulse));
 
     reg [15:0] sw_meta = 16'h0000, sw_sync = 16'h0000;
@@ -49,7 +51,17 @@ module arena_top #(
     wire oled_mirror = sw_sync[8];
     wire [INDEX_W-1:0] oled_cell;               // oled_map's cell (mirror mode)
     wire [INDEX_W-1:0] view_cell;               // cell read by maze_ram port 0 + engines' cell_state
-    assign rst = up_pulse && !game_sw;          // BTNU is "up" in GAME mode
+    // rst: once at power-on (nothing else initialises the markers, the mouse
+    // limits or the maze), then only from a long BTNU hold.  In GAME, BTNU is "up".
+    reg [3:0] por_cnt = 4'hF;
+    wire por_rst = (por_cnt != 0);
+    always @(posedge clk) if (por_rst) por_cnt <= por_cnt - 1'b1;
+    wire wipe_pulse, hold_rst_pulse;
+    btn_hold #(.HOLD_CYCLES(RESET_HOLD_CYCLES),.LOCKOUT(DEBOUNCE_LOCKOUT)) u_btnu_hold (
+        .clk(clk),.rst(por_rst),.enable(!game_sw),.btn(btnU),.press_pulse(up_pulse),
+        .short_pulse(wipe_pulse),.long_pulse(hold_rst_pulse)
+    );
+    assign rst = por_rst || hold_rst_pulse;
 
     // Configure Digilent MouseCtl to the VGA canvas coordinate limits.
     reg [1:0] mouse_cfg;
@@ -89,6 +101,7 @@ module arena_top #(
     wire [3:0] eng_done;
     wire [3:0] run_mask;                 // {dfs, ast, dij, bfs}, latched from sw[5:2] on BTNC
     wire       game_hold;                // GAME owns the board: sys_ctrl frozen in EDIT
+    wire       wipe_accept, abort_pulse; // sys_ctrl took a wipe / stopped a run
     wire                pf_load_we;          // engine load bus source (demo or game)
     wire [INDEX_W-1:0]  pf_load_addr;
     maze_gen #(.NUM_CELLS(GEN_CELLS)) u_maze_gen (
@@ -99,13 +112,14 @@ module arena_top #(
 
     sys_ctrl u_sys_ctrl (
         .clk(clk),.rst(rst),.run_pulse(run_pulse),.pause_pulse(pause_pulse),
-        .clear_pulse(clear_pulse),.random_pulse(random_pulse),.speed_sel(sw_sync[15:13]),
+        .wipe_pulse(wipe_pulse),.back_pulse(back_pulse),.random_pulse(random_pulse),.speed_sel(sw_sync[15:13]),
         .mouse_left(mouse_left_pulse && cursor_valid),.mouse_right(mouse_right_pulse && cursor_valid),
         .mouse_idx(mouse_idx),.edit_tool(sw_sync[1:0]),.gen_busy(gen_busy),.gen_done(gen_done),.engines_done(eng_done),.run_sel(sw_sync[5:2]),.hold(game_hold),
         .gen_start(gen_start),.gen_random(gen_random),.maze_we(maze_we),.maze_addr(maze_waddr),
         .maze_data(maze_wdata),.load_we(load_we),.load_addr(load_addr),.start_pulse(start_search),
         .step_en(step_en),.edit_mode(edit_mode),.start_idx(start_idx),.goal_idx(goal_idx),
-        .mode(mode),.paused(paused),.run_mask(run_mask)
+        .mode(mode),.paused(paused),.run_mask(run_mask),
+        .wipe_accept(wipe_accept),.abort_pulse(abort_pulse)
     );
     assign view_cell = oled_mirror ? oled_cell : maze_rd_addr;
     // VGA read addresses / data (clk_pix domain): cell, up, down, left, right
@@ -169,7 +183,7 @@ module arena_top #(
     assign game_hold = game_sw || game_owns;
     game_ctrl #(.MS(GAME_MS)) u_game (
         .clk(clk),.rst(rst),.game_mode(game_go),
-        .btn_c(run_pulse),.btn_u(up_pulse),.btn_d(random_pulse),.btn_l(pause_pulse),.btn_r(clear_pulse),
+        .btn_c(run_pulse),.btn_u(up_pulse),.btn_d(random_pulse),.btn_l(pause_pulse),.btn_r(back_pulse),
         .eng_sel(sw_sync[5:2]),.player_spawn(start_idx),.ghost_spawn(goal_idx),
         .maze_addr(g_maze_addr),.maze_data(maze_load_cost),.load_we(g_load_we),
         .eng_start(g_start),.eng_start_idx(g_start_idx),.eng_goal_idx(g_goal_idx),
@@ -194,8 +208,13 @@ module arena_top #(
     wire [INDEX_W-1:0]  pf_goal_idx  = game_owns ? g_goal_idx  : goal_idx;
     wire                pf_step_en   = (game_owns || game_sw) ? 1'b1 : step_en;
 
+    // A wipe or a stopped run also resets the engines: they only accept start
+    // when idle or done (CONTRACT 4.1), so one left busy would carry on with its
+    // old search at the next BTNC.  sys_ctrl never reports either in GAME.
+    reg pf_rst = 1'b0;
+    always @(posedge clk) pf_rst <= rst || wipe_accept || abort_pulse;
     pathfind_top u_pathfind (
-        .clk(clk),.rst(rst),.step_en(pf_step_en),.load_we(load_we_q),.load_addr(load_addr_q),.load_data(load_data_q),
+        .clk(clk),.rst(pf_rst),.step_en(pf_step_en),.load_we(load_we_q),.load_addr(load_addr_q),.load_data(load_data_q),
         .start(pf_start),.run_mask(pf_run_mask),.start_idx(pf_start_idx),.goal_idx(pf_goal_idx),.cell_rd_addr(view_cell),
         .bfs_busy(bfs_busy),.bfs_done(bfs_done),.bfs_found(bfs_found),.bfs_no_path(bfs_no_path),
         .bfs_path_rd_addr(g_path_addr),.bfs_path_rd_data(bfs_path),.bfs_path_cells(bfs_cells),
@@ -235,7 +254,7 @@ module arena_top #(
     wire [KW-1:0] zoom_k;
     wire [2:0] zoom_level;
     vga_zoom #(.FRAC(FRAC),.OW(OW),.KW(KW)) u_vga_zoom (
-        .clk(clk),.rst(rst),.enable(!edit_mode && !game_go),
+        .clk(clk),.rst(rst || wipe_accept),.enable(!edit_mode && !game_go),
         .new_event(mouse_event),.zpos(mouse_z),.middle(mouse_middle),
         .mouse_x(mouse_x),.mouse_y(mouse_y),
         .ox(zoom_ox),.oy(zoom_oy),.k(zoom_k),.level(zoom_level)

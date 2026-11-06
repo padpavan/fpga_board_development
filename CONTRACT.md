@@ -1,6 +1,6 @@
 # CONTRACT.md: FPGA Pathfinding Arena (Group S1_18)
 
-**Version 1.9** · Basys 3 (xc7a35tcpg236-1) · Verilog-2001
+**Version 1.10** · Basys 3 (xc7a35tcpg236-1) · Verilog-2001
 
 This file is the integration contract for the three members' work. Read it fully **before** writing any project code, whether you're a human or an AI agent. It defines only what crosses a member boundary. Everything inside a member's own block is that member's choice.
 
@@ -67,7 +67,7 @@ arena/                      <- THE integrated project
     astar_engine.v, dfs_engine.v, manhattan.v, (profiling helpers, ...)
     ast_perf_probe.v, ast_perf_sampler.v, ast_perf_hist.v   performance graph measurement + history (§8a)
   rtl/m3_io/                <- M3 owns
-    arena_top.v, sys_ctrl, maze_ram, maze_gen/lfsr, mouse_if, vga_*, oled_*,
+    arena_top.v, sys_ctrl, btn_hold, maze_ram, maze_gen/lfsr, mouse_if, vga_*, oled_*,
     game_* (GAME mode: game_ctrl, game_board, game_player, game_ghosts, game_targets, game_step)
   ip/                       <- third-party files (Digilent MouseCtl + Ps2Interface)
   constraints/arena_basys3.xdc  <- the ONE master XDC (M3 edits)
@@ -90,8 +90,8 @@ arena/                      <- THE integrated project
 | Slower rates | Use a 1-cycle **clock-enable tick** on `clk`. Do not create new clocks, except the two below. |
 | Exception 1 | `Oled_Display` is clocked by `clk6p25m` from `common/clk_div` (`DIV=16`). Only `Oled_Display` and the logic that generates its `pixel_data` may use that clock. |
 | Exception 2 | VGA runs on `clk_pix`, 148.5 MHz (`ARENA_PIX_CLK_HZ`) from the MMCM in `m3_io/vga_clkgen`, for 1920×1080 @ 60 Hz. Only `vga_timing`, `vga_render` and the pixel side of `vga_cdc` use it. 100 MHz values reach it only through `vga_cdc` (toggle handshake, applied once per frame) or as async LUTRAM reads (`maze_ram` VGA ports, engine `cell_state`); a read during a write can at worst mis-colour one pixel for one frame. The XDC declares the two clocks asynchronous. |
-| Reset | `rst`: **synchronous, active-high**, 1 = reset. Generated in `arena_top` from BTNU (debounced). Every stateful module has a `rst` input. |
-| Button inputs | Always pass through `common/debounce_btn` (2-FF synchroniser + lockout → 1-cycle `press_pulse`). |
+| Reset | `rst`: **synchronous, active-high**, 1 = reset. Generated in `arena_top` once at power-on and when BTNU is held for 3 s in demo mode (`btn_hold`). `m2_race_top` and `m2_test_top` keep their own debounced BTNU reset. Every stateful module has a `rst` input. |
+| Button inputs | Always pass through `common/debounce_btn` (2-FF synchroniser + lockout → 1-cycle `press_pulse`). **Exception (v1.10):** `debounce_btn` has no level output, so `m3_io/btn_hold` also keeps its own 2-FF copy of BTNU to time the hold and see the release; the press itself still comes from `debounce_btn`. |
 | Switch inputs | Pass through a 2-FF synchroniser before use. |
 | Naming | `snake_case`; active-low signals end in `_n`; 1-cycle pulses end in `_pulse`, `_tick` or are named `start`/`done`-style as specified here. |
 | Forbidden | Latches, combinational loops, `initial` blocks used for behaviour (initialising registers in their declaration is OK), `#delays` in RTL, gated clocks. |
@@ -240,7 +240,7 @@ The only Tier-1 parts are the engine handshake (§4) and the frozen-maze rule (�
 
 **GAME mode (v1.7, `sw[6]` = 1).** `game_ctrl` (M3) takes over the engines, the load bus and the buttons. `sys_ctrl` is held in EDIT (`hold`), so a demo run in progress is abandoned and the maze, start and goal stay frozen. The game starts once `sys_ctrl` is in EDIT and no engine is busy, and it keeps the engines until its last search has finished after `sw[6]` goes off. It uses the engines only through the §4 handshake: it loads the current maze once per level over the load bus (only while no search is in flight), then repeatedly starts **one** engine (`run_mask` one-hot, `step_en` = 1) from a ghost's cell to that ghost's target cell and reads the route through `path_rd_addr` (addr 1 = the ghost's next cell). The demo start marker is the player spawn and the goal marker is the ghost spawn. Ghost targets (`game_targets`): red = Pac-Man, pink = 3 cells ahead of him, cyan = 3 cells behind, orange = his cell mirrored away from red; a ghost goes straight for Pac-Man when its target is a wall or unreachable, when it stands on it, or when it is within 2 cells of him (so ghosts that meet do not merge). A BFS / Dijkstra / A* ghost replans before every step; a DFS ghost follows its whole path before replanning (replanning DFS every step makes it shuttle between two cells). Levels L1–L4: DFS 2 ghosts 750 ms/cell, Dijkstra 3 ghosts 600 ms, BFS 3 ghosts 475 ms, A* 4 ghosts 350 ms; the player moves every 200 ms. If any of `sw[5:2]` is on when a level starts, the levels cycle through the selected engines instead (order BFS, Dijkstra, A*, DFS; level *L* uses selected engine *L* mod *n*). Eat every reachable pellet to clear a level; 3 lives; score 10 per pellet + 500 × level per clear.
 
-Suggested `sys_ctrl` states: **EDIT** (mouse edits / generator writes `maze_ram`) → **LOAD** (stream all 192 cells into the engines over the load bus, 1 cell/clk) → **RUN** (pulse `start`; drive `step_en` from the speed and pause controls) → **DONE** (every *selected* engine `done`; show results) → back to EDIT. **PAUSE** holds `step_en = 0`. The engine selection (`sw[5:2]`) is latched into `run_mask` when the run starts; a run with nothing selected is ignored.
+Suggested `sys_ctrl` states: **EDIT** (mouse edits / generator writes `maze_ram`) → **LOAD** (stream all 192 cells into the engines over the load bus, 1 cell/clk) → **RUN** (pulse `start`; drive `step_en` from the speed and pause controls) → **DONE** (every *selected* engine `done`; show results) → back to EDIT, keeping the maze (BTNR, also from RUN or PAUSE, which resets the engines so none stays busy). **PAUSE** holds `step_en = 0`. The engine selection (`sw[5:2]`) is latched into `run_mask` when the run starts; a run with nothing selected is ignored.
 
 ## 8. Metrics to the OLED [T1 for the signals, T2 for the screen]
 
@@ -303,7 +303,7 @@ An OLED plot of each engine's progress to the goal against time, on the demo res
 | Port | Pins | Driven / used by |
 |---|---|---|
 | `clk` | W5 | everyone (100 MHz) |
-| `btnU` | T18 | **reset** in demo mode (feeds `rst`); "up" in GAME mode (`sw[6]` = 1), where it does not reset |
+| `btnU` | T18 | demo mode: short press wipes the map, held 3 s feeds `rst`; "up" in GAME mode (`sw[6]` = 1), where it never wipes or resets |
 | `btnC`, `btnL`, `btnR`, `btnD` | U18, W19, T17, U17 | M3 (`sys_ctrl`) |
 | `sw[15:0]` | Basys 3 standard | M3; `sw[12:9]` reserved for M1/M2 debug |
 | `led[8:0]` | | M3: engine status |
@@ -316,7 +316,7 @@ An OLED plot of each engine's progress to the goal against time, on the demo res
 | `oled_cs, oled_sdin, oled_sclk, oled_d_cn, oled_resn, oled_vccen, oled_pmoden` | Pmod JB | M3 (`Oled_Display`) |
 
 **[T2: default] Controls** (M3 may change; record in `m3_io/INTERFACE.md`):
-- **Buttons (demo):** BTNU = reset · BTNC = start run / confirm · BTNL = pause/resume · BTNR = clear maze · BTND = generate random maze.
+- **Buttons (demo):** BTNU short press = wipe the map: all cells open, start and goal back at their defaults, engines and zoom cleared, any run stopped (fires on release) · BTNU held 3 s = full reset · BTNC = start run / confirm · BTNL = pause/resume · BTNR = back to EDIT with the maze, start and goal intact, from RUN, PAUSE or DONE · BTND = generate random maze.
 - **Buttons (GAME):** BTNU / BTND / BTNL / BTNR = up / down / left / right (Pac-Man style: a press sets the direction, he keeps moving and takes a queued turn at the first open cell) · BTNC = start level / pause-resume / next level / restart.
 - **Switches:** `sw[1:0]` = edit tool (00 wall, 01 start, 10 goal, 11 weight) · `sw[5:2]` = engines to run (`sw[2]` BFS, `sw[3]` Dijkstra, `sw[4]` A*, `sw[5]` DFS; in GAME, the levels cycle through the selected engines instead of the default DFS, Dijkstra, BFS, A*) · `sw[6]` = GAME mode · `sw[7]` = VGA theme in demo mode (0 classic, 1 Pac-Man; GAME is always Pac-Man) · `sw[8]` = OLED mirror of the VGA picture (testing without a monitor; see §8) · `sw[15:13]` = animation speed (000 = full speed … 111 = slowest).
 - **Mouse:** left = apply tool, right = erase, wheel = zoom the RUN view about the cursor (1×–8×), middle = reset zoom.
@@ -390,3 +390,4 @@ The code already in the repo predates this contract. These changes bring it into
 | 1.7 | 2026-11-04 | **Tier-1:** §9: `btnU` is the reset only in demo mode; in GAME mode (`sw[6]` = 1) it is "up" and never resets. `sw[6]` = GAME mode; the VGA theme moves to `sw[7]`. §7: GAME mode description (`game_ctrl` drives the engines through the unchanged §4 handshake, one engine at a time, and reads routes with `path_rd_addr`; `sys_ctrl` held in EDIT). §8: OLED screen = engine selection / ranked compute times in µs with the gap to the fastest / GAME score (`oled_screen`; `oled_stats` gains `gap_bcd` and `snap_order` outputs, existing ports unchanged so `m2_race_top` is unaffected). §9 controls, LEDs and VGA defaults for GAME. §8/§9: `sw[8]` OLED mirror of the VGA picture (`oled_map`). No change to the engines, `pathfind_top` or `common/`. |
 | 1.8 | 2026-11-05 | **Tier-1:** new §8a performance graph: sampler → graph interface (`hist_*`), rules and sampler inputs; M2 measures (`ast_perf_sampler`, committed as a stub with the agreed ports and tied-off outputs for M2 to fill in), M1 stores and plots (`gv_graph`, `gv_hist_ram`). `arena_defs.vh`: `ARENA_GV_ADDR_W/DATA_W/PLOG_W`. §1: new files, `gv_` prefix. §2: `gv_graph` / `gv_hist_ram` read side on `clk_pix`. §9: `sw[10:9]` graph screen, `sw[11]` graph metric (`sw[12]` stays reserved). `arena_top` (M3) wires the sampler, a second `vga_cdc` and the VGA screen mux, per §0. No change to the engines or `pathfind_top`. |
 | 1.9 | 2026-11-05 | **Tier-1:** §8a rewritten: the performance graph moves from a VGA screen to the OLED results view. The `hist_*` interface, `gv_graph`, `gv_hist_ram`, the second `vga_cdc` and the VGA mux are removed, and the "maze explored" metric is dropped. M2 now owns the history (`ast_perf_hist`, rotated addressing) and defines the metric exactly; M1 draws, with `oled_stats` supplying the timing labels. `arena_defs.vh`: `ARENA_GV_*` replaced by `ARENA_PG_*`. §1 and §2: `gv_*` removed. §8: exception for the graph. §9: `sw[11:9]` freed (`sw[12:9]` reserved). `arena_top` wires the sampler and history, read side unconnected until M1's renderer. Reference model: `<name>.perf.expect`, `<name>.perf.total`; `dijkstra()` now mirrors `dij_min_heap`'s pop order. No change to the engines or `pathfind_top`. |
+| 1.10 | 2026-11-06 | **Tier-1:** §2 and §9: BTNU is no longer the plain reset. `rst` now comes from a power-on counter in `arena_top` and from holding BTNU for 3 s in demo mode (new `m3_io/btn_hold`, with a §2 exception for its own synchronised copy of the button); a short BTNU press wipes the map. BTNU still never wipes or resets in GAME. §7 and §9: BTNR returns to EDIT with the maze intact from RUN, PAUSE or DONE, replacing "clear maze", so no button now clears walls but keeps the markers. The board now initialises itself at power-on, with no first BTNU press needed. `arena_top` drives the engines' `rst` from `rst`, a wipe or a stopped run (the §4 reset behaviour; no engine change). `pathfinder.xpr` lists the new files. No change to the engines, `pathfind_top`, `common/` or `m2_*_top`. |
