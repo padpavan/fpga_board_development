@@ -19,6 +19,7 @@ run_one tb_maze_ram rtl/m3_io/maze_ram.v
 run_one tb_maze_gen rtl/m3_io/maze_gen.v
 run_one tb_mouse_if rtl/m3_io/mouse_if.v
 run_one tb_sys_ctrl rtl/m3_io/sys_ctrl.v
+run_one tb_btn_hold rtl/m3_io/btn_hold.v rtl/common/debounce_btn.v
 run_one tb_vga_timing rtl/m3_io/vga_timing.v
 run_one tb_vga_render rtl/m3_io/vga_render.v rtl/m3_io/vga_timing.v
 run_one tb_vga_zoom rtl/m3_io/vga_zoom.v

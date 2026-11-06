@@ -12,11 +12,12 @@ Owner-editable (Tier 2). Binding rules live in `/CONTRACT.md`.
 | `vga_clkgen` | — | MMCME2_BASE: 100 MHz → 148.5 MHz (`clk_pix`), BUFG'd |
 | `vga_zoom` | 100 MHz | wheel / middle-click zoom state (`ox`, `oy`, `k`, `level`) |
 | `vga_cdc` | both | moves the view bundle to `clk_pix`, applied once per frame |
+| `btn_hold` | `clk` | BTNU short press vs 3 s hold, for the wipe and the full reset |
 | `vga_timing` | `clk_pix` | CEA 1080p60 counters, active-high syncs, `view_tick` |
 | `vga_render` | `clk_pix` | 4-stage pipelined renderer, registered RGB/syncs |
 
 ## Controls (CONTRACT §9 defaults, plus)
-- Buttons: BTNU reset, BTNC run, BTNL pause, BTNR clear, BTND random maze.
+- Buttons: BTNU short press wipe (fires on release), BTNU held 3 s full reset, BTNC run, BTNL pause, BTNR back to EDIT with the maze intact, BTND random maze.
 - Switches: `sw[1:0]` edit tool, `sw[2]` theme (0 classic, 1 Pac-Man), `sw[15:13]` speed.
 - Mouse: left apply tool, right erase, **wheel zoom (RUN only)**, **middle reset zoom**.
 
@@ -80,3 +81,9 @@ Owner-editable (Tier 2). Binding rules live in `/CONTRACT.md`.
 - 2026-11-05 (made by M2 for CONTRACT v1.9; replaces the entry above): the VGA graph, `u_gv_cdc`, `graph_sw` and the final VGA mux are gone, so `vga_render` drives the pins directly again. `arena_top` instantiates `ast_perf_sampler` and `ast_perf_hist` with the read side unconnected (`pg_*` wires) until M1's OLED renderer connects there; M1 will also change `oled_screen`. `sw[11:9]` are free.
 - 2026-11-05 (made by M1 for CONTRACT §8a; review welcome): `u_gv_plot` (`gv_oled_plot`) drives `pg_rd_idx` and draws the whole demo results view: the timing header from `oled_stats` plus the live graph. `oled_pixel_data` = mirror ? `oled_map` : `oled_view == 1` ? graph : `oled_screen`. In the end `oled_screen` was not changed: its results view is no longer shown, but its EDIT and GAME views are.
 - 2026-11-06 (made by M1 for CONTRACT v1.10; review welcome): per-quadrant zoom and OLED pages. `vga_zoom` outputs four views plus `sel` / `sel_valid` (left click selects); the `vga_cdc` view bundle carries all four (228 more bits). `vga_render` takes `run_ox/oy/k/zoom_level` as 4-quadrant buses and `zoom_sel/zoom_sel_valid`: the DDA reloads `wx` from the left/right quadrant's origin at the line end / quadrant edge (as before), and keeps one row position per quadrant column (`wy_l`, `wy_r`) that is swapped into `wy` at the same points, so the S1 path is unchanged. The view values are registered ahead of use (`ox_l`, `ox_r`, `kl`, `kr`, `kcur`). The selected quadrant gets a 4 px yellow border; the legend shows its zoom level and reads CLICK + / WHEEL. OLED: `oled_page` = `sw[11:9]` (0 in GAME) picks menu / graph / results / points / algorithms; page 011 forces `oled_screen`'s view to 1. `tb_vga_render` frame 7 checks one zoomed, selected quadrant beside three at 1x.
+- 2026-11-06 (CONTRACT v1.11): BTNU splits into wipe and reset; BTNR returns to EDIT.  This replaces `rst = BTNU && !sw[6]` from the v1.7 note above.
+  - `arena_top`: `rst = por_rst || long_pulse`.  `por_rst` is a counter initialised in its declaration, because BTNU's first press used to be what initialised the markers, the mouse limits and the maze, and waiting for a 3 s hold at every boot isn't usable.
+  - `btn_hold`: `enable = !sw[6]`, so a BTNU hold in GAME does nothing and flipping `sw[6]` on mid-hold cancels it.  `up_pulse` still goes straight to the game, so "up" has no added delay.  The demo wipe has to wait for the release, because a press can't be identified as short before then.
+  - `sys_ctrl`: `clear_pulse` is replaced by `wipe_pulse` and `back_pulse`; new outputs `wipe_accept` and `abort_pulse`.  Both buttons are ignored during GEN, LOAD and START, and under `hold`.
+  - Engine reset: `pf_rst` (registered) = `rst || wipe_accept || abort_pulse`.  It is needed because engines accept `start` only when idle or done, so one abandoned mid-run would stay busy and carry on with its old search at the next BTNC.  `sys_ctrl` gates both signals with `hold`, so they can't disturb a GAME search, even while the game keeps the engines after `sw[6]` goes off.
+  - `vga_zoom.rst` = `rst || wipe_accept`, which clears all four quadrant views and the selection.  BTNR keeps them.
