@@ -1,13 +1,6 @@
 `timescale 1ns / 1ps
-//////////////////////////////////////////////////////////////////////////////
-// ast_absdiff : combinational absolute difference  d = |a - b|
-//
-// Unsigned inputs.  One comparator picks which way round to subtract, so the
-// result is never negative and needs no extra sign bit:
-//     a >= b  ->  d = a - b
-//     a <  b  ->  d = b - a
-// Used by manhattan.v for |row_a - row_b| and |col_a - col_b|.
-//////////////////////////////////////////////////////////////////////////////
+
+// Search engines
 module ast_absdiff #(
     parameter W = 4
 ) (

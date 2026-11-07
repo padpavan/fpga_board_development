@@ -1,31 +1,7 @@
 `timescale 1ns / 1ps
 `include "arena_defs.vh"
-//////////////////////////////////////////////////////////////////////////////
-// gv_oled_plot : the OLED results view with the performance graph
-// (CONTRACT 8a, v1.9: M2 measures and stores, M1 draws).
-//
-// Shown on the demo results view (LOAD..DONE), so the curves grow live while
-// the engines run and the VGA shows the race.
-//
-//   y 0..15   two 5x7 text lines, two engines each, fastest first
-//             (oled_stats snap_order), in the engine colours:
-//               fastest   name + time in us     "BFS12.04"
-//               others    name + gap in us      "DIJ+5.16"
-//               running   "A*  RUN"   no path "DFS NONE"   not run "DFS OFF" (grey)
-//             Times come from oled_stats (cyc_bcd / gap_bcd), cycle-exact.
-//   y 16..62  plot: level L (0..46 = 0..100 %) at y = 62 - L, sample i at
-//             x = i + 1 (94 samples), axes at x = 0 and y = 63.  Dotted grid at
-//             50 % and 100 %.  Each curve fills from rd_prev_level to rd_level
-//             in its column (continuous), stops at its engine's finish
-//             (end_idx), and a dotted line in its colour drops from there to
-//             the x axis.  A* on top, then Dijkstra, BFS, DFS.
-//   labels    3x5 font, dim, drawn behind everything else in the plot:
-//             "100%" top left, "50" left of the 50 % line, "TIME>" bottom right.
-//
-// Combinational from Oled_Display's pixel_index (6.25 MHz).  Reads only
-// registers / LUTRAM of the 100 MHz domain (CONTRACT 8 / 8a): rd_idx goes to
-// ast_perf_hist, whose combinational levels come back the same pixel.
-//////////////////////////////////////////////////////////////////////////////
+
+// OLED graph
 module gv_oled_plot #(
     parameter AW        = `ARENA_PG_ADDR_W,
     parameter LW        = `ARENA_PG_LEVEL_W,
@@ -35,7 +11,6 @@ module gv_oled_plot #(
 ) (
     input  wire [12:0]      pixel_index,
     output reg  [15:0]      pixel_data,
-    // ast_perf_hist / ast_perf_sampler (CONTRACT 8a)
     output wire [AW-1:0]    rd_idx,
     input  wire [4*LW-1:0]  rd_level,
     input  wire [4*LW-1:0]  rd_prev_level,
@@ -43,37 +18,35 @@ module gv_oled_plot #(
     input  wire [3:0]       mask,
     input  wire [4*AW-1:0]  end_idx,
     input  wire [3:0]       end_valid,
-    // oled_stats snapshot (CONTRACT 8)
     input  wire [3:0]       snap_mask,
-    input  wire [4*4-1:0]   snap_status,      // per engine {busy, done, found, no_path}
+    input  wire [4*4-1:0]   snap_status,
     input  wire [4*3-1:0]   snap_place,
-    input  wire [4*2-1:0]   snap_order,       // engine per slot, fastest first
+    input  wire [4*2-1:0]   snap_order,
     input  wire [4*24-1:0]  cyc_bcd,
     input  wire [4*24-1:0]  gap_bcd
 );
     localparam AXIS_Y = 63;
-    localparam TOP_Y  = AXIS_Y - 1 - LEVEL_MAX;          // 16: level 46
-    localparam MID_Y  = AXIS_Y - 1 - LEVEL_MAX/2;        // 39: level 23 (50 %)
+    localparam TOP_Y  = AXIS_Y - 1 - LEVEL_MAX;
+    localparam MID_Y  = AXIS_Y - 1 - LEVEL_MAX/2;
     localparam [15:0] BLACK = 16'h0000, GREY = 16'h7BEF, AXIS = 16'h8410,
                       GRID = 16'h31A6, LABEL = 16'h6B4D;
 
     wire [6:0] x = pixel_index % OLED_W;
     wire [5:0] y = pixel_index / OLED_W;
 
-    function [15:0] eng_colour; input [1:0] en;          // = oled_screen / VGA
+    function [15:0] eng_colour; input [1:0] en;
         case (en)
-            2'd0:    eng_colour = 16'h07FF;               // BFS cyan
-            2'd1:    eng_colour = 16'hFFE0;               // DIJ yellow
-            2'd2:    eng_colour = 16'h07E0;               // A* green
-            default: eng_colour = 16'hFB35;               // DFS pink
+            2'd0:    eng_colour = 16'h07FF;
+            2'd1:    eng_colour = 16'hFFE0;
+            2'd2:    eng_colour = 16'h07E0;
+            default: eng_colour = 16'hFB35;
         endcase
     endfunction
 
-    // ------------------------------------------------------------- plot ----
-    wire [AW-1:0] idx = x - 1'b1;                        // sample in this column
+    wire [AW-1:0] idx = x - 1'b1;
     assign rd_idx = (x != 0 && idx < count) ? idx : {AW{1'b0}};
     wire          in_plot = (x != 0) && (y >= TOP_Y) && (y < AXIS_Y) && (idx < count) && (idx < SAMPLES);
-    wire [LW-1:0] lv = AXIS_Y - 1 - y;                   // level of this row
+    wire [LW-1:0] lv = AXIS_Y - 1 - y;
 
     reg [3:0] curve, fin;
     reg [LW-1:0] c_lv, p_lv;
@@ -84,7 +57,6 @@ module gv_oled_plot #(
             c_lv = rd_level[e*LW +: LW];
             p_lv = rd_prev_level[e*LW +: LW];
             e_i  = end_idx[e*AW +: AW];
-            // levels never fall, but take either order to be safe
             curve[e] = in_plot && mask[e] && (!end_valid[e] || idx <= e_i) &&
                        (((lv >= p_lv) && (lv <= c_lv)) || ((lv <= p_lv) && (lv >= c_lv)));
             fin[e]   = in_plot && mask[e] && end_valid[e] && (idx == e_i) &&
@@ -94,9 +66,6 @@ module gv_oled_plot #(
     wire grid_on = (x != 0) && !x[0] && (y == TOP_Y || y == MID_Y);
     wire axis_on = (x == 0 && y >= TOP_Y) || (y == AXIS_Y);
 
-    // ------------------------------------------------------- 5x7 header ----
-    // constant slices only (a computed part-select into a glyph crashed
-    // Vivado 2025.2 synthesis in an earlier draft)
     function [4:0] glyph;
         input [7:0] c; input [2:0] r;
         reg [34:0] g;
@@ -149,8 +118,6 @@ module gv_oled_plot #(
 
     function [7:0] dig; input [3:0] d; dig = "0" + d; endfunction
 
-    // 5-char time in us from 6 BCD digits d5..d0 (d2 = units of us):
-    //   < 100 us "12.04" / " 6.88",  < 1000 us "123.4",  else "1234 "
     function [7:0] time5; input [23:0] v; input [2:0] col;
         begin
             if (v[23:20] != 0)
@@ -167,7 +134,6 @@ module gv_oled_plot #(
                            3'd3: time5 = dig(v[7:4]);   default: time5 = dig(v[3:0]); endcase
         end
     endfunction
-    // "+" and a 4-char gap in us: "+5.16", "+12.3", "+123", "+1234"
     function [7:0] gap5; input [23:0] v; input [2:0] col;
         begin
             if (col == 3'd0) gap5 = "+";
@@ -186,11 +152,11 @@ module gv_oled_plot #(
         end
     endfunction
 
-    wire [3:0]  chr  = x / 6;                            // 16 chars per line
+    wire [3:0]  chr  = x / 6;
     wire [2:0]  gx   = x % 6;
     wire [2:0]  gy   = y[2:0];
-    wire [1:0]  slot = {y[3], chr[3]};                   // line 0: slots 0,1; line 1: 2,3
-    wire [2:0]  sc   = chr[2:0];                         // char inside the 8-char slot
+    wire [1:0]  slot = {y[3], chr[3]};
+    wire [2:0]  sc   = chr[2:0];
     wire [1:0]  re   = snap_order[slot*2 +: 2];
     wire [3:0]  st   = snap_status[re*4 +: 4];
     wire [2:0]  pl   = snap_place[re*3 +: 3];
@@ -198,7 +164,7 @@ module gv_oled_plot #(
     wire [23:0] gap  = gap_bcd[re*24 +: 24];
     wire        r_sel  = snap_mask[re];
     wire        r_done = st[2];
-    wire [2:0]  vc   = sc - 3'd3;                        // value column 0..4
+    wire [2:0]  vc   = sc - 3'd3;
 
     reg [7:0]  ch;
     reg [15:0] fg;
@@ -216,7 +182,6 @@ module gv_oled_plot #(
                          ((gx == 0) ? tbits[4] : (gx == 1) ? tbits[3] : (gx == 2) ? tbits[2] :
                           (gx == 3) ? tbits[1] : tbits[0]);
 
-    // ------------------------------------------------------- 3x5 labels ----
     function [2:0] glyph3;
         input [7:0] c; input [2:0] r;
         reg [14:0] g;
@@ -240,11 +205,7 @@ module gv_oled_plot #(
             endcase
         end
     endfunction
-    // Every label starts at x = 4 + 4k, so with lx = x - 4 the column inside a
-    // glyph is lx[1:0] (3 = gap) and the character is lx[6:2].
-    // "100%" at x 4..19, y 18..22 ; "50" at x 4..11, y 41..45 (under the 50 %
-    // line) ; "TIME>" at x 76..95, y 57..61.  One small term per label.
-    wire [6:0] lx  = x - 7'd4;                           // labels at x = 4 + 4k
+    wire [6:0] lx  = x - 7'd4;
     wire [5:0] y18 = y - 6'd18, y41 = y - 6'd41, y57 = y - 6'd57;
     wire in100 = (y >= 18) && (y < 23) && (x >= 4) && (x < 20);
     wire in50  = (y >= 41) && (y < 46) && (x >= 4) && (x < 12);
@@ -257,7 +218,6 @@ module gv_oled_plot #(
     wire label_on = (lx[1:0] == 2'd0) ? lbits[2] : (lx[1:0] == 2'd1) ? lbits[1] :
                     (lx[1:0] == 2'd2) ? lbits[0] : 1'b0;
 
-    // ------------------------------------------------------------ output ---
     always @* begin
         if (y < TOP_Y)                          pixel_data = text_on ? fg : BLACK;
         else if (curve[`ARENA_ENG_AST])         pixel_data = eng_colour(`ARENA_ENG_AST);

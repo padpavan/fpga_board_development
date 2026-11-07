@@ -1,6 +1,7 @@
 `timescale 1ns / 1ps
 `include "arena_defs.vh"
-// Sequential deterministic LFSR maze fill; start and goal cells remain open.
+
+// Edit mode
 module maze_gen #(
     parameter NUM_CELLS = `ARENA_NUM_CELLS,
     parameter INDEX_W = `ARENA_INDEX_W,

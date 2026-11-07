@@ -1,10 +1,7 @@
 `timescale 1ns / 1ps
 `include "arena_defs.vh"
-// Convert Digilent MouseCtl reports into cell-indexed press events.
-// The cell mapping matches vga_render's EDIT layout: square cells, grid
-// centred horizontally.  Division by the cell size is a multiply by its
-// reciprocal (exact over the whole screen; checked by tb_mouse_if).
-// cell_idx / cursor_valid are registered (1 clk after xpos / ypos).
+
+// Mouse
 module mouse_if #(
     parameter INDEX_W = `ARENA_INDEX_W,
     parameter COLS = `ARENA_COLS,
@@ -20,11 +17,11 @@ module mouse_if #(
     output reg cursor_valid
 );
     localparam CELL_X = H_VISIBLE/COLS, CELL_Y = V_VISIBLE/ROWS;
-    localparam CELL = (CELL_X < CELL_Y) ? CELL_X : CELL_Y;          // 90
-    localparam X0 = (H_VISIBLE - COLS*CELL)/2;                      // 240
-    localparam Y0 = (V_VISIBLE - ROWS*CELL)/2;                      // 0
+    localparam CELL = (CELL_X < CELL_Y) ? CELL_X : CELL_Y;
+    localparam X0 = (H_VISIBLE - COLS*CELL)/2;
+    localparam Y0 = (V_VISIBLE - ROWS*CELL)/2;
     localparam SH = 18;
-    localparam [13:0] RECIP = ((1 << SH) + CELL - 1)/CELL;          // ceil(2^18 / CELL)
+    localparam [13:0] RECIP = ((1 << SH) + CELL - 1)/CELL;
     wire in_x = (xpos >= X0) && (xpos < X0 + COLS*CELL);
     wire in_y = (ypos >= Y0) && (ypos < Y0 + ROWS*CELL);
     wire [11:0] ex = xpos - X0;

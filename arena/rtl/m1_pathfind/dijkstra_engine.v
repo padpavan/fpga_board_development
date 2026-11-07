@@ -1,19 +1,7 @@
 `timescale 1ns / 1ps
 `include "arena_defs.vh"
-//////////////////////////////////////////////////////////////////////////////
-// Member 1 - Dijkstra engine (weighted shortest path)
-//
-//   - distance RAM, visited set and parent/predecessor memory.
-//   - minimum unsettled-distance selection by an indexed binary min-heap
-//     (dij_min_heap): pop the minimum, push / decrease-key on each relax.
-//   - non-negative cost relaxation:  d[v] <- min(d[v], d[u] + cost[v]).
-//   - predecessor-based path reconstruction.
-//   - 2-bit cell_state RAM with an independent async read port for VGA.
-//
-// Port list and handshake identical to bfs_engine (CONTRACT.md section 4).
-// Dijkstra uses the cell costs, so `path_cost` reports the minimum weighted
-// cost while `path_cells` reports the number of cells on that route.
-//////////////////////////////////////////////////////////////////////////////
+
+// Dijkstra engine
 module dijkstra_engine #(
     parameter COLS    = `ARENA_COLS,
     parameter ROWS    = `ARENA_ROWS,
@@ -26,34 +14,28 @@ module dijkstra_engine #(
     input  wire                 rst,
     input  wire                 step_en,
 
-    // maze load interface (only while not busy)
     input  wire                 load_we,
     input  wire [INDEX_W-1:0]   load_addr,
     input  wire [COST_W-1:0]    load_data,
 
-    // run control
     input  wire                 start,
     input  wire [INDEX_W-1:0]   start_idx,
     input  wire [INDEX_W-1:0]   goal_idx,
 
-    // status
     output reg                  busy,
     output reg                  done,
     output reg                  found,
     output reg                  no_path,
 
-    // path readback (valid after done && found)
     input  wire [INDEX_W-1:0]   path_rd_addr,
     output wire [INDEX_W-1:0]   path_rd_data,
-    output reg  [DIST_W-1:0]    path_cells,   // cells in path (start and goal inclusive)
-    output reg  [DIST_W-1:0]    path_cost,    // minimum weighted cost
+    output reg  [DIST_W-1:0]    path_cells,
+    output reg  [DIST_W-1:0]    path_cost,
 
-    // live search view (node currently selected / being relaxed)
     output wire [INDEX_W-1:0]   current,
     input  wire [INDEX_W-1:0]   cell_rd_addr,
     output wire [1:0]           cell_state,
 
-    // statistics
     output reg  [CNT_W-1:0]     cycles,
     output reg  [DIST_W-1:0]    expansions
 );
@@ -66,9 +48,6 @@ module dijkstra_engine #(
     localparam [INDEX_W-1:0] COLS_W = COLS;
     localparam [INDEX_W-1:0] ROWS_W = ROWS;
 
-    // FSM states.  Every finish goes through S_FINISH, which lets the last
-    // registered memory write land before done rises, then returns to S_IDLE
-    // with done = 1.
     localparam [3:0] S_IDLE        = 4'd0,
                      S_INIT        = 4'd1,
                      S_SELECT      = 4'd2,
@@ -85,28 +64,23 @@ module dijkstra_engine #(
     reg [INDEX_W-1:0] recon_cur, recon_idx;
     reg [DIST_W-1:0]  sel_dist, recon_len;
     reg [1:0]         dir;
-    reg               ep_wall;     // start or goal seen as a wall during S_INIT
+    reg               ep_wall;
 
-    // relax pipeline: S_RELAX registers the neighbour reads, S_RELAX_WR
-    // compares and writes (keeps the RAM-read -> add -> compare path short)
     reg               rx_ok;
     reg [INDEX_W-1:0] rx_idx;
     reg [DIST_W-1:0]  rx_new, rx_old;
 
-    // memory write ports
     reg               dist_we;    reg [INDEX_W-1:0] dist_waddr; reg [DIST_W-1:0]  dist_wdata;
     reg               vis_we;     reg [INDEX_W-1:0] vis_waddr;  reg               vis_wdata;
     reg               par_we;     reg [INDEX_W-1:0] par_waddr;  reg [INDEX_W-1:0] par_wdata;
     reg               path_we;    reg [INDEX_W-1:0] path_waddr; reg [INDEX_W-1:0] path_wdata;
     reg               cs_we;      reg [INDEX_W-1:0] cs_waddr;   reg [1:0]         cs_wdata;
 
-    // memory read data
     wire               vis_rdata;
     wire [COST_W-1:0]  cost_rdata;
     wire [DIST_W-1:0]  dist_rdata;
     wire [INDEX_W-1:0] par_rdata;
 
-    // -------- combinational neighbour generation (from `sel`) --------------
     wire [INDEX_W-1:0] sel_row = sel / COLS;
     wire [INDEX_W-1:0] sel_col = sel % COLS;
 
@@ -122,20 +96,16 @@ module dijkstra_engine #(
         (dir == 2'd2) ? (sel_col > 0)          :
                         (sel_col < (COLS - 1));
 
-    // -------- read-address muxes -------------------------------------------
     wire [INDEX_W-1:0] cost_raddr = (state == S_INIT)   ? clr_addr  : nb_sel;
     wire [INDEX_W-1:0] par_raddr  = recon_cur;
 
-    // -------- start / goal validity check (during S_INIT) ------------------
     wire ep_hit = ((clr_addr == s_idx) || (clr_addr == g_idx)) &&
                   (cost_rdata == `ARENA_COST_WALL);
     wire ep_out = (s_idx >= NUM_CELLS) || (g_idx >= NUM_CELLS);
 
-    // -------- relaxation arithmetic ----------------------------------------
     wire [DIST_W-1:0] cost_ext = {{(DIST_W-COST_W){1'b0}}, cost_rdata};
     wire [DIST_W-1:0] new_dist = sel_dist + cost_ext;
 
-    // -------- memories -----------------------------------------------------
     grid_mem #(.ADDR_W(INDEX_W), .DATA_W(COST_W)) u_cost (
         .clk(clk), .we(load_we), .waddr(load_addr), .wdata(load_data),
         .raddr(cost_raddr), .rdata(cost_rdata)
@@ -166,10 +136,6 @@ module dijkstra_engine #(
         .raddr(cell_rd_addr), .rdata(cell_state)
     );
 
-    // -------- priority queue -----------------------------------------------
-    // Commands are combinational so the heap sees them on the same step.  A
-    // cell with a finite distance that isn't settled is already queued, so an
-    // improving relax on it is a decrease-key rather than an insert.
     wire               heap_ready, heap_empty;
     wire [INDEX_W-1:0] heap_min_idx;
     wire [DIST_W-1:0]  heap_min_key;
@@ -196,7 +162,6 @@ module dijkstra_engine #(
 
     assign current = sel;
 
-    // -------- FSM + registers ----------------------------------------------
     always @(posedge clk) begin
         if (rst) begin
             state       <= S_IDLE;
@@ -215,9 +180,6 @@ module dijkstra_engine #(
             path_we     <= 1'b0;
             cs_we       <= 1'b0;
         end else begin
-            // defaults: no memory writes next step.  A write issued on the
-            // last step before a pause is held (and gated by step_en at the
-            // memory) until the engine resumes.
             if (step_en) begin
                 dist_we <= 1'b0;
                 vis_we  <= 1'b0;
@@ -226,8 +188,6 @@ module dijkstra_engine #(
                 cs_we   <= 1'b0;
             end
 
-            // cycles: every step_en cycle after start, up to and including
-            // the cycle done rises (busy is still 1 on that edge)
             if (busy && step_en && cycles != CNT_MAX)
                 cycles <= cycles + 1'b1;
 
@@ -277,14 +237,10 @@ module dijkstra_engine #(
                         end
                     end
 
-                    // queue the start cell (the heap was cleared on the last
-                    // S_INIT step, so it is ready)
                     S_SEED: begin
                         state <= S_SELECT;
                     end
 
-                    // pop the closest unsettled cell; wait while the heap is
-                    // still sifting after the previous push / pop
                     S_SELECT: begin
                         if (heap_ready) begin
                             if (heap_empty) begin
@@ -323,8 +279,6 @@ module dijkstra_engine #(
                         state  <= S_RELAX_WR;
                     end
 
-                    // an improving relax also pushes into the heap, so it waits
-                    // until the heap has finished the previous pop / push
                     S_RELAX_WR: begin
                         if (!rx_improve || heap_ready) begin
                             if (rx_improve) begin

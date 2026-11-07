@@ -1,18 +1,7 @@
 `timescale 1ns / 1ps
 `include "arena_defs.vh"
-// EDIT -> LOAD -> START -> RUN/PAUSE -> DONE controller and maze edit bus.
-// run_sel (sw[5:2]) picks the engines; it is latched into run_mask when BTNC
-// starts a run (a run with nothing selected is ignored). DONE = every
-// selected engine is done.
-// wipe_pulse (short BTNU): from EDIT, RUN, PAUSE or DONE, clears the maze and
-// puts start and goal back at their defaults.  back_pulse (BTNR): from RUN,
-// PAUSE or DONE, returns to EDIT with the maze and markers untouched.
-// wipe_accept = a wipe was taken; abort_pulse = a run was stopped by either
-// button.  arena_top uses both to reset the engines, which would otherwise stay
-// busy.
-// hold = 1 (GAME mode owns the board, CONTRACT v1.7): a demo run is abandoned
-// (LOAD..DONE -> EDIT), and EDIT ignores buttons and mouse edits, so the maze
-// and the markers stay frozen.  A maze generation in progress still finishes.
+
+// Edit mode
 module sys_ctrl #(
     parameter NUM_CELLS=`ARENA_NUM_CELLS, parameter INDEX_W=`ARENA_INDEX_W,
     parameter COST_W=`ARENA_COST_W, parameter SPEED_W=23
@@ -23,18 +12,18 @@ module sys_ctrl #(
     input wire mouse_left, input wire mouse_right, input wire [INDEX_W-1:0] mouse_idx,
     input wire [1:0] edit_tool,
     input wire gen_busy, input wire gen_done,
-    input wire [3:0] engines_done,   // {dfs, ast, dij, bfs}
-    input wire [3:0] run_sel,        // {dfs, ast, dij, bfs} switches
-    input wire hold,                 // GAME mode: freeze the demo
+    input wire [3:0] engines_done,
+    input wire [3:0] run_sel,
+    input wire hold,
     output reg gen_start, output reg gen_random,
     output reg maze_we, output reg [INDEX_W-1:0] maze_addr, output reg [COST_W-1:0] maze_data,
     output reg load_we, output reg [INDEX_W-1:0] load_addr,
     output reg start_pulse, output reg step_en, output reg edit_mode,
     output reg [INDEX_W-1:0] start_idx, output reg [INDEX_W-1:0] goal_idx,
     output reg [2:0] mode, output reg paused,
-    output reg [3:0] run_mask,       // engines in the current / last run
-    output wire wipe_accept,         // wipe_pulse taken this cycle
-    output wire abort_pulse          // wipe or back stopped a run this cycle
+    output reg [3:0] run_mask,
+    output wire wipe_accept,
+    output wire abort_pulse
 );
     localparam [2:0] M_EDIT=3'd0, M_GEN=3'd1, M_LOAD=3'd2, M_START=3'd3,
                      M_RUN=3'd4, M_PAUSE=3'd5, M_DONE=3'd6, M_GEN_REQ=3'd7;

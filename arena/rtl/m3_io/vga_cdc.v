@@ -1,12 +1,7 @@
 `timescale 1ns / 1ps
 `include "arena_defs.vh"
-// Moves a bundle of slow-changing 100 MHz values into the VGA pixel domain.
-//   clk_a: every 2^CNT_W cycles, capture din and flip req.
-//   clk_b: when the synchronised req flips, copy the (stable) capture into a
-//          staging register; on apply_b (once per frame) copy it to dout, so
-//          a frame never mixes old and new values.
-// The capture holds for 2^CNT_W clk_a cycles, far longer than the 2-FF
-// synchroniser, so the staged copy is always a clean value.
+
+// VGA
 module vga_cdc #(
     parameter W = 8,
     parameter CNT_W = 10

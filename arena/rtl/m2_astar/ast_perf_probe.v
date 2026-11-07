@@ -1,15 +1,7 @@
 `timescale 1ns / 1ps
 `include "arena_defs.vh"
-//////////////////////////////////////////////////////////////////////////////
-// ast_perf_probe : one engine's closest approach to the goal (CONTRACT 8a)
-//
-//   best = min over the cells the engine has expanded of manhattan(cell, goal)
-//
-// clr empties it (best = all-ones = "nothing expanded yet", above any real
-// distance).  While en = 1 the cell on `current` counts, unless it is IDX_NONE.
-// en must stay 0 until the engine's first expansion of this run: BFS and
-// Dijkstra keep `current` from the previous run until then.
-//////////////////////////////////////////////////////////////////////////////
+
+// OLED graph
 module ast_perf_probe #(
     parameter INDEX_W = `ARENA_INDEX_W,
     parameter DIST_W  = `ARENA_DIST_W,

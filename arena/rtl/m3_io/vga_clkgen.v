@@ -1,12 +1,10 @@
 `timescale 1ns / 1ps
 `include "arena_defs.vh"
-// 148.5 MHz VGA pixel clock for 1920x1080 @ 60 Hz (CONTRACT section 2 exception).
-//   VCO = 100 MHz / 5 * 37.125 = 742.5 MHz (MMCM range 600..1200 MHz)
-//   clk_pix = 742.5 / 5 = 148.5 MHz
-// Only VGA timing/render and the pixel side of vga_cdc run on clk_pix.
+
+// VGA
 module vga_clkgen (
-    input  wire clk,          // 100 MHz system clock
-    output wire clk_pix,      // 148.5 MHz, on a global buffer
+    input  wire clk,
+    output wire clk_pix,
     output wire locked
 );
     wire clk_fb, clk_fb_buf, clk_pix_raw;

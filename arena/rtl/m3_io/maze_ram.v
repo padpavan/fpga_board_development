@@ -1,9 +1,7 @@
 `timescale 1ns / 1ps
 `include "arena_defs.vh"
-// Master maze cost store, written on clk (100 MHz).
-// Async reads: raddr feeds the engine load bus (clk domain); the five vga_*
-// ports serve the renderer (a cell and its four neighbours, clk_pix domain).
-// Out-of-range addresses read as 0 (wall).  Each read port is its own LUTRAM copy.
+
+// Edit mode
 module maze_ram #(
     parameter NUM_CELLS = `ARENA_NUM_CELLS,
     parameter INDEX_W = `ARENA_INDEX_W,

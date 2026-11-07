@@ -1,42 +1,28 @@
 `timescale 1ns / 1ps
 `include "arena_defs.vh"
-// Scroll-wheel zoom for the RUN view, one view per quadrant (CONTRACT 9, v1.10).
-//
-// Each quadrant q (0 BFS, 1 Dijkstra, 2 A*, 3 DFS, i.e. {bottom, right}) has
-// its own view (ox[q], oy[q], level[q]): the grid position (in cells, FRAC-bit
-// fixed point) of the quadrant's top-left pixel, and the zoom level.  Level L
-// magnifies by L+1, so k[q] = 1 / (CELL * (L+1)) cells per screen pixel.
-//
-// Left click (RUN view only) selects the quadrant under the cursor.  The wheel
-// then zooms only the selected quadrant, one level per notch, keeping the grid
-// point under the cursor still:
-//     ox' = ox + mx * (k - k'),   mx = cursor x inside its quadrant.
-// The result is clamped so the view never leaves the grid's level-0 framing;
-// level 0 always returns to the default centred view.  Middle click resets the
-// selected quadrant (all four if none is selected).  Before the first click no
-// quadrant is selected and the wheel does nothing.  Clicks and the wheel are
-// ignored in EDIT / GAME (enable = 0); rst clears every view and the selection.
+
+// VGA
 module vga_zoom #(
     parameter COLS=`ARENA_COLS, parameter ROWS=`ARENA_ROWS,
     parameter H_VISIBLE=`ARENA_VGA_H, parameter V_VISIBLE=`ARENA_VGA_V,
     parameter FRAC=20, parameter OW=28, parameter KW=16,
-    parameter ZOOM_IN_NEG=1      // 1: negative wheel delta (wheel pushed away) zooms in
+    parameter ZOOM_IN_NEG=1
 ) (
     input  wire clk, input wire rst, input wire enable,
     input  wire new_event, input wire [3:0] zpos, input wire middle, input wire left,
     input  wire [11:0] mouse_x, input wire [11:0] mouse_y,
-    output wire [4*OW-1:0] ox,         // per quadrant, quadrant q at [q*OW +: OW] (signed)
+    output wire [4*OW-1:0] ox,
     output wire [4*OW-1:0] oy,
     output wire [4*KW-1:0] k,
     output wire [4*3-1:0]  level,
-    output reg  [1:0]      sel = 2'd0, // selected quadrant
+    output reg  [1:0]      sel = 2'd0,
     output reg             sel_valid = 1'b0
 );
     localparam QUAD_W = H_VISIBLE/2, QUAD_H = V_VISIBLE/2;
     localparam CELL_X = QUAD_W/COLS, CELL_Y = QUAD_H/ROWS;
-    localparam CELL   = (CELL_X < CELL_Y) ? CELL_X : CELL_Y;      // 45 px at level 0
-    localparam MARGIN_X = (QUAD_W - COLS*CELL)/2;                 // 120
-    localparam MARGIN_Y = (QUAD_H - ROWS*CELL)/2;                 // 0
+    localparam CELL   = (CELL_X < CELL_Y) ? CELL_X : CELL_Y;
+    localparam MARGIN_X = (QUAD_W - COLS*CELL)/2;
+    localparam MARGIN_Y = (QUAD_H - ROWS*CELL)/2;
     localparam ONE = 1 << FRAC;
     localparam K1 = (ONE + (CELL*1)/2)/(CELL*1), K2 = (ONE + (CELL*2)/2)/(CELL*2),
                K3 = (ONE + (CELL*3)/2)/(CELL*3), K4 = (ONE + (CELL*4)/2)/(CELL*4),
@@ -52,7 +38,6 @@ module vga_zoom #(
             3'd4: k_of = K5; 3'd5: k_of = K6; 3'd6: k_of = K7; default: k_of = K8;
         endcase
     endfunction
-    // largest allowed origin: the view's far edge stops at the level-0 margin
     function signed [OW-1:0] ox_max;
         input [2:0] l;
         case (l)
@@ -74,7 +59,6 @@ module vga_zoom #(
         endcase
     endfunction
 
-    // the four views
     reg signed [OW-1:0] vox [0:3];
     reg signed [OW-1:0] voy [0:3];
     reg        [2:0]    vlev[0:3];
@@ -97,10 +81,10 @@ module vga_zoom #(
     wire [1:0] click_q    = {(mouse_y >= QUAD_H), (mouse_x >= QUAD_W)};
 
     reg        middle_d = 1'b0, left_d = 1'b0;
-    reg [1:0]  st = 2'd0;             // 0 idle, 1 multiply, 2 apply
+    reg [1:0]  st = 2'd0;
     reg [2:0]  nlev;
-    reg signed [12:0]   mx, my;       // cursor inside its quadrant
-    reg signed [KW:0]   dk;           // k(level) - k(nlev)
+    reg signed [12:0]   mx, my;
+    reg signed [KW:0]   dk;
     reg signed [OW-1:0] px, py;
     wire signed [OW-1:0] nx = vox[sel] + px;
     wire signed [OW-1:0] ny = voy[sel] + py;

@@ -1,19 +1,10 @@
 `timescale 1ns / 1ps
 `include "arena_defs.vh"
-// Splits one button into a short press and a long hold (CONTRACT v1.11).
-//
-// press_pulse comes from the button's common/debounce_btn, which starts the
-// timer.  debounce_btn has no level output, so the release is read from this
-// module's own 2-FF copy of btn.  Anything low inside the first LOCKOUT cycles
-// is treated as contact bounce, so a short_pulse never comes earlier than that.
-//
-//   short_pulse: released before HOLD_CYCLES (one cycle, on release)
-//   long_pulse : still held at HOLD_CYCLES (one cycle, while held; the release
-//                that follows gives no short_pulse)
-//   enable = 0 : ignores presses and cancels a hold in progress, with no pulse
+
+// Buttons
 module btn_hold #(
     parameter HOLD_CYCLES = 3 * `ARENA_CLK_HZ,
-    parameter LOCKOUT     = 20_000_000       // same value as the debounce_btn
+    parameter LOCKOUT     = 20_000_000
 ) (
     input  wire clk, input wire rst, input wire enable,
     input  wire btn, input wire press_pulse,

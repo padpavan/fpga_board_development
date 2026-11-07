@@ -1,21 +1,7 @@
 `timescale 1ns / 1ps
 `include "arena_defs.vh"
-//////////////////////////////////////////////////////////////////////////////
-// game_player : Pac-Man style grid movement.
-//
-//   btn_*  : 1-cycle press pulses (debounce_btn).  A press sets the wanted
-//            direction; it stays queued until it can be taken (or another
-//            press replaces it).
-//   tick   : 1-cycle move enable (one cell per tick at most).  On a tick:
-//              1. if a turn is queued and that neighbour is open, turn and
-//                 step (the queue clears);
-//              2. else if moving and the cell ahead is open, step;
-//              3. else stop (at a wall).
-//   spawn  : puts the player on spawn_pos, stopped, facing left, nothing
-//            queued (level start / respawn).
-//   moved  : 1-cycle pulse after every step; prev_pos is the cell left.
-// The player never enters a wall or leaves the grid.
-//////////////////////////////////////////////////////////////////////////////
+
+// Game mode
 module game_player #(
     parameter NUM_CELLS = `ARENA_NUM_CELLS, parameter INDEX_W = `ARENA_INDEX_W
 ) (
@@ -27,7 +13,7 @@ module game_player #(
     input  wire                 tick,
     output reg  [INDEX_W-1:0]   pos,
     output reg  [INDEX_W-1:0]   prev_pos,
-    output reg  [1:0]           dir,      // facing: 0 up, 1 down, 2 left, 3 right
+    output reg  [1:0]           dir,
     output reg                  moving,
     output reg                  moved
 );
@@ -55,7 +41,6 @@ module game_player #(
             if (tick) begin
                 if (can_want) begin
                     dir <= want; prev_pos <= pos; pos <= nb_want; moving <= 1'b1; moved <= 1'b1;
-                    // a press in this same cycle stays queued
                     if (!(btn_up || btn_down || btn_left || btn_right)) want_v <= 1'b0;
                 end else if (can_dir) begin
                     prev_pos <= pos; pos <= nb_dir; moved <= 1'b1;

@@ -1,39 +1,18 @@
 `timescale 1ns / 1ps
 `include "arena_defs.vh"
-//////////////////////////////////////////////////////////////////////////////
-// gv_oled_menu : the OLED menu, points leaderboard and algorithm pages
-// (CONTRACT 8b, v1.10).  arena_top picks the page with sw[11:9]:
-//
-//   000 automatic (oled_screen / gv_oled_plot, not drawn here)
-//   001 MENU        lists the pages and their switch codes
-//   010 graph       (gv_oled_plot)        011 race results (oled_screen view 1)
-//   100 POINTS      leaderboard, ranked by total points
-//   101 ALGORITHMS  one entry per engine
-//
-// Points (clk, 100 MHz): a demo race is scored when every engine selected for
-// it is done.  Engines that found a path are ranked by cycles: place = 1 + the
-// number of selected, found engines with fewer cycles (ties share a place),
-// and places 1/2/3/4 earn 3/2/1/0 points.  No path or not selected: 0.  rst
-// (BTNU) clears the totals; a race cut short by rst never counts.  Totals and
-// the race count saturate at 999.
-//
-// Pixel side: combinational from Oled_Display's pixel_index (6.25 MHz), 16 x 8
-// characters of 6 x 8 px.  It reads only registers of the 100 MHz domain, which
-// change at most once per race (CONTRACT 8): at worst one glitched frame.
-//////////////////////////////////////////////////////////////////////////////
+
+// OLED menu
 module gv_oled_menu #(
     parameter CNT_W  = `ARENA_CNT_W,
     parameter OLED_W = `ARENA_OLED_W
 ) (
     input  wire               clk,
     input  wire               rst,
-    // demo race (clk domain); buses packed {dfs, ast, dij, bfs}
-    input  wire               start,          // demo start pulse (never a GAME search)
+    input  wire               start,
     input  wire [3:0]         run_mask,
     input  wire [3:0]         done,
     input  wire [3:0]         found,
     input  wire [4*CNT_W-1:0] cycles,
-    // page to draw (registered on clk by arena_top): 1 menu, 4 points, 5 algorithms
     input  wire [2:0]         page,
     input  wire [12:0]        pixel_index,
     output reg  [15:0]        pixel_data
@@ -41,11 +20,10 @@ module gv_oled_menu #(
     localparam [15:0] BLACK = 16'h0000, WHITE = 16'hFFFF, GREY = 16'h7BEF, YELLOW = 16'hFFE0;
     localparam [9:0]  MAXV  = 10'd999;
 
-    // ======================================================= points (clk) ===
     reg        armed = 1'b0;
     reg [3:0]  rmask = 4'd0;
     reg        s1 = 1'b0;
-    reg [3:0]  s1_win;                       // engine scores this race
+    reg [3:0]  s1_win;
     reg [1:0]  s1_fewer [0:3];
     reg [9:0]  total [0:3];
     reg [9:0]  races = 10'd0;
@@ -65,7 +43,7 @@ module gv_oled_menu #(
         end else begin
             s1 <= 1'b0;
             if (start && run_mask != 4'd0) begin
-                armed <= 1'b1;                    // done drops on the same edge
+                armed <= 1'b1;
                 rmask <= run_mask;
             end else if (race_done) begin
                 armed <= 1'b0;
@@ -89,7 +67,6 @@ module gv_oled_menu #(
         end
     end
 
-    // leaderboard order and decimal digits, registered for the pixel side
     function [11:0] bcd3; input [9:0] b;
         integer i; reg [21:0] t;
         begin
@@ -103,8 +80,8 @@ module gv_oled_menu #(
             bcd3 = t[21:10];
         end
     endfunction
-    reg [7:0]  order = 8'b11_10_01_00;        // engine in rank 0..3 (2 bits each)
-    reg [47:0] tot_bcd = 48'd0;               // per engine, 3 BCD digits
+    reg [7:0]  order = 8'b11_10_01_00;
+    reg [47:0] tot_bcd = 48'd0;
     reg [11:0] races_bcd = 12'd0;
     reg [1:0]  rank [0:3];
     reg [1:0]  cnt2;
@@ -126,7 +103,6 @@ module gv_oled_menu #(
     integer ei;
     initial for (ei = 0; ei < 4; ei = ei + 1) begin total[ei] = 10'd0; rank[ei] = ei; end
 
-    // ====================================================== pixel side ======
     wire [6:0] x    = pixel_index % OLED_W;
     wire [5:0] y    = pixel_index / OLED_W;
     wire [3:0] chr  = x / 6;
@@ -134,7 +110,6 @@ module gv_oled_menu #(
     wire [2:0] gy   = y[2:0];
     wire [2:0] line = y[5:3];
 
-    // 5x7 font; constant slices only (see gv_oled_plot)
     function [4:0] glyph;
         input [7:0] c; input [2:0] row;
         reg [34:0] g;
@@ -191,7 +166,6 @@ module gv_oled_menu #(
         end
     endfunction
 
-    // one character of a 16-char string (constant slices)
     function [7:0] pick; input [127:0] s; input [3:0] i;
         case (i)
             4'd0:  pick = s[127:120]; 4'd1:  pick = s[119:112]; 4'd2:  pick = s[111:104]; 4'd3:  pick = s[103:96];
@@ -201,24 +175,23 @@ module gv_oled_menu #(
         endcase
     endfunction
 
-    function [15:0] eng_colour; input [1:0] en;           // = oled_screen / VGA
+    function [15:0] eng_colour; input [1:0] en;
         case (en)
-            2'd0:    eng_colour = 16'h07FF;               // BFS cyan
-            2'd1:    eng_colour = 16'hFFE0;               // DIJ yellow
-            2'd2:    eng_colour = 16'h07E0;               // A* green
-            default: eng_colour = 16'hFB35;               // DFS pink
+            2'd0:    eng_colour = 16'h07FF;
+            2'd1:    eng_colour = 16'hFFE0;
+            2'd2:    eng_colour = 16'h07E0;
+            default: eng_colour = 16'hFB35;
         endcase
     endfunction
     function [23:0] name3; input [1:0] en;
         case (en) 2'd0: name3 = "BFS"; 2'd1: name3 = "DIJ"; 2'd2: name3 = "A* "; default: name3 = "DFS"; endcase
     endfunction
 
-    // ---- MENU
     function [127:0] menu_line; input [2:0] l;
         case (l)
             3'd0: menu_line = "MENU     SW11-9 ";
-            3'd1: menu_line = "000 AUTO        ";
-            3'd2: menu_line = "001 MENU        ";
+            3'd1: menu_line = "000 MENU        ";
+            3'd2: menu_line = "001 ENGINES     ";
             3'd3: menu_line = "010 GRAPH       ";
             3'd4: menu_line = "011 RESULTS     ";
             3'd5: menu_line = "100 POINTS      ";
@@ -227,7 +200,6 @@ module gv_oled_menu #(
         endcase
     endfunction
 
-    // ---- ALGORITHMS: two lines per engine, name in its colour
     function [127:0] info_line; input [2:0] l;
         case (l)
             3'd0: info_line = "BFS FEWEST STEPS";
@@ -241,8 +213,6 @@ module gv_oled_menu #(
         endcase
     endfunction
 
-    // ---- POINTS: "POINTS 3-2-1-0", "RACES nnn", ranked lines 3..6, "BTNU RESETS"
-    // engine on ranked line 3..6, and its total (constant slices)
     reg [1:0]  pe;
     reg [11:0] pv;
     always @* begin
@@ -259,7 +229,6 @@ module gv_oled_menu #(
             default: pv = tot_bcd[47:36];
         endcase
     end
-    // digits with leading zeros blanked (the last digit always shows)
     function [7:0] d3; input [11:0] v; input [1:0] i;
         case (i)
             2'd0: d3 = (v[11:8] != 0) ? "0" + v[11:8] : " ";
@@ -272,7 +241,7 @@ module gv_oled_menu #(
     always @* begin
         ch = " "; fg = WHITE;
         case (page)
-            3'd1: begin
+            3'd0: begin
                 ch = pick(menu_line(line), chr);
                 fg = (line == 3'd0) ? YELLOW : (chr < 3) ? GREY : WHITE;
             end

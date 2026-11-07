@@ -1,13 +1,6 @@
 `timescale 1ns / 1ps
-//////////////////////////////////////////////////////////////////////////////
-// clk_div : the single shared clock divider (common/, contract section 2).
-//
-// clk_out = clk / DIV with 50% duty.  DIV must be even and >= 2.
-// The default DIV = 16 gives 100 MHz / 16 = 6.25 MHz for Oled_Display.
-//
-// Only Oled_Display may be clocked by a divided clock.  Everything else runs
-// on the 100 MHz clock and uses a 1-cycle clock-enable tick instead.
-//////////////////////////////////////////////////////////////////////////////
+
+// Clock divider
 module clk_div #(
     parameter DIV = 16
 ) (

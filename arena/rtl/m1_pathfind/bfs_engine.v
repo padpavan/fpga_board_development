@@ -1,25 +1,7 @@
 `timescale 1ns / 1ps
 `include "arena_defs.vh"
-//////////////////////////////////////////////////////////////////////////////
-// Member 1 - BFS engine (unweighted baseline shortest path)
-//
-//   - FIFO frontier queue implemented as a ring buffer in a grid_mem.
-//   - visited bitmap + parent/predecessor memory for path reconstruction.
-//   - 2-bit cell_state RAM with an independent async read port for VGA.
-//   - Reports busy/done/found/no_path, path readback, and stats
-//     (cycles, expansions, path cost / path cell count).
-//
-// Port list and handshake follow CONTRACT.md section 4:
-//   1. While not busy, load the maze into the local cost RAM using
-//      load_we / load_addr / load_data (4-bit cost, 0 = wall).
-//   2. Pulse `start` (accepted when idle or done) with start_idx / goal_idx.
-//   3. Wait for `done`; read `found` / `no_path`, then read the path back
-//      through path_rd_addr -> path_rd_data (path_cells entries).
-//   step_en = 0 freezes the search (FSM, counters, current, cell_state).
-//
-// BFS ignores cost magnitudes and treats every non-wall cell as
-// traversable with a single step, giving minimum-step routes.
-//////////////////////////////////////////////////////////////////////////////
+
+// BFS engine
 module bfs_engine #(
     parameter COLS    = `ARENA_COLS,
     parameter ROWS    = `ARENA_ROWS,
@@ -32,34 +14,28 @@ module bfs_engine #(
     input  wire                 rst,
     input  wire                 step_en,
 
-    // maze load interface (only while not busy)
     input  wire                 load_we,
     input  wire [INDEX_W-1:0]   load_addr,
     input  wire [COST_W-1:0]    load_data,
 
-    // run control
     input  wire                 start,
     input  wire [INDEX_W-1:0]   start_idx,
     input  wire [INDEX_W-1:0]   goal_idx,
 
-    // status
     output reg                  busy,
     output reg                  done,
     output reg                  found,
     output reg                  no_path,
 
-    // path readback (valid after done && found)
     input  wire [INDEX_W-1:0]   path_rd_addr,
     output wire [INDEX_W-1:0]   path_rd_data,
-    output reg  [DIST_W-1:0]    path_cells,   // cells in path (start and goal inclusive)
-    output reg  [DIST_W-1:0]    path_cost,    // number of steps (edges)
+    output reg  [DIST_W-1:0]    path_cells,
+    output reg  [DIST_W-1:0]    path_cost,
 
-    // live search view (node currently being expanded / popped)
     output reg  [INDEX_W-1:0]   current,
     input  wire [INDEX_W-1:0]   cell_rd_addr,
     output wire [1:0]           cell_state,
 
-    // statistics
     output reg  [CNT_W-1:0]     cycles,
     output reg  [DIST_W-1:0]    expansions
 );
@@ -71,9 +47,6 @@ module bfs_engine #(
     localparam [INDEX_W-1:0] COLS_W = COLS;
     localparam [INDEX_W-1:0] ROWS_W = ROWS;
 
-    // FSM states.  Every finish goes through S_FINISH, which lets the last
-    // registered memory write land before done rises, then returns to S_IDLE
-    // with done = 1.
     localparam [2:0] S_IDLE        = 3'd0,
                      S_CLEAR       = 3'd1,
                      S_START_ENQ   = 3'd2,
@@ -90,25 +63,20 @@ module bfs_engine #(
     reg [DIST_W-1:0]  recon_len;
     reg [1:0]         dir;
     reg [INDEX_W:0]   count;
-    reg               ep_wall;     // start or goal seen as a wall during S_CLEAR
+    reg               ep_wall;
 
-    // memory write ports
     reg               vis_we;      reg [INDEX_W-1:0] vis_waddr;  reg              vis_wdata;
     reg               par_we;      reg [INDEX_W-1:0] par_waddr;  reg [INDEX_W-1:0] par_wdata;
     reg               q_we;        reg [INDEX_W-1:0] q_waddr;    reg [INDEX_W-1:0] q_wdata;
     reg               path_we;     reg [INDEX_W-1:0] path_waddr; reg [INDEX_W-1:0] path_wdata;
     reg               cs_we;       reg [INDEX_W-1:0] cs_waddr;   reg [1:0]         cs_wdata;
 
-    // memory read data
     wire              vis_rdata;
     wire [COST_W-1:0] cost_rdata;
     wire [INDEX_W-1:0] q_rdata, par_rdata;
 
-    // write ports are registered, so a slot enqueued on the previous step is
-    // still pending when S_POP reads it: forward it
     wire [INDEX_W-1:0] q_head = (q_we && q_waddr == head) ? q_wdata : q_rdata;
 
-    // -------- combinational neighbour generation (from `current`) ----------
     wire [INDEX_W-1:0] cur_row = current / COLS;
     wire [INDEX_W-1:0] cur_col = current % COLS;
 
@@ -124,13 +92,11 @@ module bfs_engine #(
         (dir == 2'd2) ? (cur_col > 0)          :
                         (cur_col < (COLS - 1));
 
-    // -------- start / goal validity check (during S_CLEAR) -----------------
     wire [INDEX_W-1:0] cost_raddr = (state == S_CLEAR) ? clr_addr : nb_sel;
     wire ep_hit = ((clr_addr == s_idx) || (clr_addr == g_idx)) &&
                   (cost_rdata == `ARENA_COST_WALL);
     wire ep_out = (s_idx >= NUM_CELLS) || (g_idx >= NUM_CELLS);
 
-    // -------- memories -----------------------------------------------------
     grid_mem #(.ADDR_W(INDEX_W), .DATA_W(COST_W)) u_cost (
         .clk(clk), .we(load_we), .waddr(load_addr), .wdata(load_data),
         .raddr(cost_raddr), .rdata(cost_rdata)
@@ -161,7 +127,6 @@ module bfs_engine #(
         .raddr(cell_rd_addr), .rdata(cell_state)
     );
 
-    // -------- FSM + registers ----------------------------------------------
     always @(posedge clk) begin
         if (rst) begin
             state       <= S_IDLE;
@@ -180,9 +145,6 @@ module bfs_engine #(
             path_we     <= 1'b0;
             cs_we       <= 1'b0;
         end else begin
-            // defaults: no memory writes next step.  A write issued on the
-            // last step before a pause is held (and gated by step_en at the
-            // memory) until the engine resumes.
             if (step_en) begin
                 vis_we  <= 1'b0;
                 par_we  <= 1'b0;
@@ -191,8 +153,6 @@ module bfs_engine #(
                 cs_we   <= 1'b0;
             end
 
-            // cycles: every step_en cycle after start, up to and including
-            // the cycle done rises (busy is still 1 on that edge)
             if (busy && step_en && cycles != CNT_MAX)
                 cycles <= cycles + 1'b1;
 

@@ -1,17 +1,7 @@
 `timescale 1ns / 1ps
 `include "arena_defs.vh"
-//////////////////////////////////////////////////////////////////////////////
-// Member 1 - engine cluster (CONTRACT.md section 5)
-//
-// Instantiates the BFS, Dijkstra, A* and DFS engines and fans out the shared
-// maze-load, run control and cell_rd_addr so all three engines receive
-// identical frozen-maze data and launch concurrently on one `start` pulse.
-// run_mask gates `start` per engine: an unselected engine never starts and
-// keeps its previous status; the controller ignores it (CONTRACT v1.5).
-//
-// Every other section 4 port is per engine, prefixed bfs_ / dij_ / ast_ / dfs_.
-// M3 integrates only this module.  M2 owns the u_astar and u_dfs instances.
-//////////////////////////////////////////////////////////////////////////////
+
+// Search engines
 module pathfind_top #(
     parameter COLS    = `ARENA_COLS,
     parameter ROWS    = `ARENA_ROWS,
@@ -24,90 +14,74 @@ module pathfind_top #(
     input  wire                 rst,
     input  wire                 step_en,
 
-    // shared maze load interface
     input  wire                 load_we,
     input  wire [INDEX_W-1:0]   load_addr,
     input  wire [COST_W-1:0]    load_data,
 
-    // shared run control
     input  wire                 start,
-    input  wire [3:0]           run_mask,     // {dfs, ast, dij, bfs}: 1 = this engine runs (CONTRACT v1.5 5)
+    input  wire [3:0]           run_mask,
     input  wire [INDEX_W-1:0]   start_idx,
     input  wire [INDEX_W-1:0]   goal_idx,
 
-    // shared live-view address
     input  wire [INDEX_W-1:0]   cell_rd_addr,
 
-    // BFS status
     output wire                 bfs_busy,
     output wire                 bfs_done,
     output wire                 bfs_found,
     output wire                 bfs_no_path,
 
-    // BFS path readback
     input  wire [INDEX_W-1:0]   bfs_path_rd_addr,
     output wire [INDEX_W-1:0]   bfs_path_rd_data,
     output wire [DIST_W-1:0]    bfs_path_cells,
     output wire [DIST_W-1:0]    bfs_path_cost,
 
-    // BFS live view + stats
     output wire [INDEX_W-1:0]   bfs_current,
     output wire [1:0]           bfs_cell_state,
     output wire [CNT_W-1:0]     bfs_cycles,
     output wire [DIST_W-1:0]    bfs_expansions,
 
-    // Dijkstra status
     output wire                 dij_busy,
     output wire                 dij_done,
     output wire                 dij_found,
     output wire                 dij_no_path,
 
-    // Dijkstra path readback
     input  wire [INDEX_W-1:0]   dij_path_rd_addr,
     output wire [INDEX_W-1:0]   dij_path_rd_data,
     output wire [DIST_W-1:0]    dij_path_cells,
     output wire [DIST_W-1:0]    dij_path_cost,
 
-    // Dijkstra live view + stats
     output wire [INDEX_W-1:0]   dij_current,
     output wire [1:0]           dij_cell_state,
     output wire [CNT_W-1:0]     dij_cycles,
     output wire [DIST_W-1:0]    dij_expansions,
 
-    // A* status
     output wire                 ast_busy,
     output wire                 ast_done,
     output wire                 ast_found,
     output wire                 ast_no_path,
 
-    // A* path readback
     input  wire [INDEX_W-1:0]   ast_path_rd_addr,
     output wire [INDEX_W-1:0]   ast_path_rd_data,
     output wire [DIST_W-1:0]    ast_path_cells,
     output wire [DIST_W-1:0]    ast_path_cost,
 
-    // A* live view + stats
     output wire [INDEX_W-1:0]   ast_current,
     output wire [1:0]           ast_cell_state,
     output wire [CNT_W-1:0]     ast_cycles,
     output wire [DIST_W-1:0]    ast_expansions,
 
-    // A* debug (CONTRACT 0: optional dbg_ output, may be left unconnected)
     output wire [3:0]           ast_dbg_state,
 
-    // DFS status
     output wire                 dfs_busy,
     output wire                 dfs_done,
     output wire                 dfs_found,
     output wire                 dfs_no_path,
 
-    // DFS path readback
     input  wire [INDEX_W-1:0]   dfs_path_rd_addr,
     output wire [INDEX_W-1:0]   dfs_path_rd_data,
     output wire [DIST_W-1:0]    dfs_path_cells,
     output wire [DIST_W-1:0]    dfs_path_cost,
 
-    // DFS live view + stats
     output wire [INDEX_W-1:0]   dfs_current,
     output wire [1:0]           dfs_cell_state,
     output wire [CNT_W-1:0]     dfs_cycles,

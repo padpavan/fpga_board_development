@@ -1,9 +1,7 @@
 `timescale 1ns / 1ps
 `include "arena_defs.vh"
-// game_step : the grid neighbour of `pos` in direction `dir` (combinational).
-//   dir 0 up, 1 down, 2 left, 3 right.
-//   ok = 0 when the move would leave the grid (nb is then don't-care).
-// Walls are the caller's job (open[nb]).
+
+// Game mode
 module game_step #(
     parameter COLS = `ARENA_COLS, parameter ROWS = `ARENA_ROWS,
     parameter INDEX_W = `ARENA_INDEX_W

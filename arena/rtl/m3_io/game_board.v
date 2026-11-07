@@ -1,23 +1,7 @@
 `timescale 1ns / 1ps
 `include "arena_defs.vh"
-//////////////////////////////////////////////////////////////////////////////
-// game_board : the game's copy of the maze, reachability and pellets.
-//
-// On `init` (1-cycle pulse; player_spawn / ghost_spawn sampled then):
-//   LOAD  : streams maze_ram cells 0..NUM_CELLS-1 (1 per clk) over rd_addr.
-//           The same address/strobe drive the engines' load bus (load_we),
-//           so the engines get the maze in the same pass.  open[i] = cost != wall.
-//   FLOOD : reach = cells reachable from player_spawn, one BFS layer per clk
-//           (192-bit neighbour shifts), until nothing changes.
-//   COUNT : pellet = reach minus both spawn cells; pellets_left counted by a
-//           1-cell-per-clk scan.
-//   READY : `ready` = 1.  no_path = 1 if the player spawn is a wall or the
-//           ghost spawn is not reachable (the level can't be played).
-// While READY, `eat` (1-cycle pulse) clears the pellet under eat_pos and
-// raises `ate` for one cycle if there was one.
-// keep_pellets = 1 on init keeps the current pellet vector and count (used
-// for a respawn); the maze is still reloaded and re-flooded.
-//////////////////////////////////////////////////////////////////////////////
+
+// Game mode
 module game_board #(
     parameter COLS = `ARENA_COLS, parameter ROWS = `ARENA_ROWS,
     parameter NUM_CELLS = `ARENA_NUM_CELLS,
@@ -28,18 +12,15 @@ module game_board #(
     input  wire                 keep_pellets,
     input  wire [INDEX_W-1:0]   player_spawn,
     input  wire [INDEX_W-1:0]   ghost_spawn,
-    // maze_ram read (async) + engine load strobe
     output wire [INDEX_W-1:0]   rd_addr,
     input  wire [COST_W-1:0]    rd_data,
     output wire                 load_we,
-    // results
     output reg  [NUM_CELLS-1:0] open,
     output reg  [NUM_CELLS-1:0] pellet,
-    output reg  [NUM_CELLS-1:0] reach,          // reachable from player_spawn (valid when ready)
+    output reg  [NUM_CELLS-1:0] reach,
     output reg  [INDEX_W-1:0]   pellets_left,
     output wire                 ready,
     output reg                  no_path,
-    // eating
     input  wire                 eat,
     input  wire [INDEX_W-1:0]   eat_pos,
     output reg                  ate
@@ -50,7 +31,6 @@ module game_board #(
     reg [INDEX_W-1:0]   p_spawn, g_spawn;
     reg                 keep;
 
-    // cells in column 0 / column COLS-1
     function [NUM_CELLS-1:0] col_mask;
         input integer c;
         integer i;
@@ -63,7 +43,6 @@ module game_board #(
     localparam [NUM_CELLS-1:0] FIRST_COL = col_mask(0);
     localparam [NUM_CELLS-1:0] LAST_COL  = col_mask(COLS-1);
 
-    // cell i is reached from i-1 (left), i+1 (right), i-COLS (up), i+COLS (down)
     wire [NUM_CELLS-1:0] from_left  = (reach << 1)    & ~FIRST_COL;
     wire [NUM_CELLS-1:0] from_right = (reach >> 1)    & ~LAST_COL;
     wire [NUM_CELLS-1:0] from_up    =  reach << COLS;
@@ -94,7 +73,6 @@ module game_board #(
                     end else ptr <= ptr + 1'b1;
                 end
                 B_FLOOD: begin
-                    // first cycle seeds the player spawn (if it is open)
                     if (reach == 0 && ptr == 0) begin
                         reach[p_spawn] <= open[p_spawn];
                         ptr <= 1;

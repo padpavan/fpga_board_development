@@ -1,28 +1,13 @@
 `timescale 1ns / 1ps
 `include "arena_defs.vh"
-// Integrated Basys 3 top for the FPGA Pathfinding Arena.
-//
-// Two modes (CONTRACT 9, v1.7):
-//   demo (sw[6] = 0): edit a maze, race the selected engines (sw[5:2]), OLED
-//         shows the engines' compute times.  BTNU short press = wipe the map,
-//         BTNU held 3 s = full reset, BTNR = back to EDIT with the maze intact.
-//   GAME (sw[6] = 1): game_ctrl takes the engines, the maze and the buttons
-//         (BTNU/D/L/R steer Pac-Man, BTNC start/pause); BTNU never wipes or resets.
-//         sys_ctrl is held in EDIT.  The game starts once the demo is in EDIT
-//         and no engine is busy, and it keeps the engines until its last
-//         search has finished after sw[6] goes off.
-//   RUN view zoom (CONTRACT 9, v1.10): left click selects a quadrant (yellow
-//         border); the wheel zooms only that quadrant, middle click resets it.
-//   sw[11:9] (CONTRACT 8b, v1.10): OLED page.  000 automatic (as before),
-//         001 menu, 010 graph, 011 race results, 100 points, 101 algorithms.
-//         GAME always shows the score.  (The sw[8] OLED mirror was removed in
-//         v1.12: sw[8] is unused.)
+
+// Top level
 module arena_top #(
     parameter DEBOUNCE_LOCKOUT=20_000_000,
-    parameter RESET_HOLD_CYCLES=3*`ARENA_CLK_HZ, // BTNU hold for a full reset (3 s); small in simulation
+    parameter RESET_HOLD_CYCLES=3*`ARENA_CLK_HZ,
     parameter GEN_CELLS=`ARENA_NUM_CELLS,
-    parameter OLED_SNAP_DIV=`ARENA_CLK_HZ/10,    // OLED stats refresh (10 Hz); small in simulation
-    parameter GAME_MS=`ARENA_CLK_HZ/1000         // game timing unit (1 ms); small in simulation
+    parameter OLED_SNAP_DIV=`ARENA_CLK_HZ/10,
+    parameter GAME_MS=`ARENA_CLK_HZ/1000
 ) (
     input wire clk,
     input wire btnU, input wire btnC, input wire btnL, input wire btnR, input wire btnD,
@@ -38,6 +23,8 @@ module arena_top #(
     localparam INDEX_W=`ARENA_INDEX_W, COST_W=`ARENA_COST_W,
                DIST_W=`ARENA_DIST_W, CNT_W=`ARENA_CNT_W;
     wire rst, up_pulse, run_pulse, pause_pulse, back_pulse, random_pulse;
+
+    // Buttons
     debounce_btn #(.LOCKOUT(DEBOUNCE_LOCKOUT)) u_db_up (.CLOCK(clk),.btn(btnU),.press_pulse(up_pulse));
     debounce_btn #(.LOCKOUT(DEBOUNCE_LOCKOUT)) u_db_run (.CLOCK(clk),.btn(btnC),.press_pulse(run_pulse));
     debounce_btn #(.LOCKOUT(DEBOUNCE_LOCKOUT)) u_db_pause (.CLOCK(clk),.btn(btnL),.press_pulse(pause_pulse));
@@ -50,8 +37,6 @@ module arena_top #(
         sw_sync <= sw_meta;
     end
     wire game_sw = sw_sync[6];
-    // rst: once at power-on (nothing else initialises the markers, the mouse
-    // limits or the maze), then only from a long BTNU hold.  In GAME, BTNU is "up".
     reg [3:0] por_cnt = 4'hF;
     wire por_rst = (por_cnt != 0);
     always @(posedge clk) if (por_rst) por_cnt <= por_cnt - 1'b1;
@@ -62,7 +47,7 @@ module arena_top #(
     );
     assign rst = por_rst || hold_rst_pulse;
 
-    // Configure Digilent MouseCtl to the VGA canvas coordinate limits.
+    // Mouse
     reg [1:0] mouse_cfg;
     reg [11:0] mouse_value;
     wire [11:0] mouse_x, mouse_y;
@@ -90,6 +75,7 @@ module arena_top #(
         .cell_idx(mouse_idx),.cursor_valid(cursor_valid)
     );
 
+    // Edit mode
     wire gen_start, gen_random, gen_busy, gen_done, gen_we;
     wire [INDEX_W-1:0] gen_addr;
     wire [COST_W-1:0] gen_data;
@@ -98,10 +84,10 @@ module arena_top #(
     wire [COST_W-1:0] maze_wdata, maze_cost, maze_load_cost;
     wire [2:0] mode;
     wire [3:0] eng_done;
-    wire [3:0] run_mask;                 // {dfs, ast, dij, bfs}, latched from sw[5:2] on BTNC
-    wire       game_hold;                // GAME owns the board: sys_ctrl frozen in EDIT
-    wire       wipe_accept, abort_pulse; // sys_ctrl took a wipe / stopped a run
-    wire                pf_load_we;          // engine load bus source (demo or game)
+    wire [3:0] run_mask;
+    wire       game_hold;
+    wire       wipe_accept, abort_pulse;
+    wire                pf_load_we;
     wire [INDEX_W-1:0]  pf_load_addr;
     maze_gen #(.NUM_CELLS(GEN_CELLS)) u_maze_gen (
         .clk(clk),.rst(rst),.start(gen_start),.randomize(gen_random),
@@ -120,7 +106,6 @@ module arena_top #(
         .mode(mode),.paused(paused),.run_mask(run_mask),
         .wipe_accept(wipe_accept),.abort_pulse(abort_pulse)
     );
-    // VGA read addresses / data (clk_pix domain): cell, up, down, left, right
     wire [INDEX_W-1:0] vga_up_addr, vga_dn_addr, vga_lf_addr, vga_rt_addr;
     wire [COST_W-1:0] vga_up_cost, vga_dn_cost, vga_lf_cost, vga_rt_cost;
     maze_ram u_maze_ram (
@@ -132,11 +117,6 @@ module arena_top #(
         .vga_data0(maze_cost),.vga_data1(vga_up_cost),.vga_data2(vga_dn_cost),
         .vga_data3(vga_lf_cost),.vga_data4(vga_rt_cost)
     );
-    // The load bus is registered one cycle before it fans out to the four
-    // engines' cost RAMs (100 MHz timing).  The last cell (191) is then
-    // written on the same edge the engines sample `start`, while busy is
-    // still 0 (allowed, CONTRACT 4.1.1), and CLEAR reads the cost RAM only
-    // after that.
     reg                load_we_q;
     reg [INDEX_W-1:0]  load_addr_q;
     reg [COST_W-1:0]   load_data_q;
@@ -161,7 +141,7 @@ module arena_top #(
     assign eng_done = {dfs_done,ast_done,dij_done,bfs_done};
     wire eng_any_busy = bfs_busy || dij_busy || ast_busy || dfs_busy;
 
-    // ---------------- GAME mode ----------------
+    // Game mode
     wire g_load_we, g_start, g_eng_busy;
     wire [INDEX_W-1:0] g_maze_addr, g_start_idx, g_goal_idx, g_path_addr;
     wire [3:0] g_run_mask, g_state;
@@ -171,13 +151,12 @@ module arena_top #(
     wire [3:0] g_ghost_present;
     wire [`ARENA_NUM_CELLS-1:0] g_pellet;
     wire [19:0] g_score_bcd;
-    // the game starts once the demo is back in EDIT and the engines are idle
     reg game_go = 1'b0;
     always @(posedge clk) begin
         if (rst || !game_sw) game_go <= 1'b0;
         else if (mode == 3'd0 && !eng_any_busy && !gen_busy) game_go <= 1'b1;
     end
-    wire game_owns = game_go || g_eng_busy;     // the game drives the engines
+    wire game_owns = game_go || g_eng_busy;
     assign game_hold = game_sw || game_owns;
     game_ctrl #(.MS(GAME_MS)) u_game (
         .clk(clk),.rst(rst),.game_mode(game_go),
@@ -195,9 +174,8 @@ module arena_top #(
         .level(g_level),.algo(g_algo),.lives(g_lives),.score(),.score_bcd(g_score_bcd),
         .eng_busy(g_eng_busy)
     );
-    // engine inputs: the game's while it owns them, else sys_ctrl's.  In GAME
-    // the engines always run at full speed (a demo run still in flight when
-    // sw[6] goes on finishes in well under a millisecond).
+
+    // Search engines
     assign              pf_load_we   = game_owns ? g_load_we   : load_we;
     assign              pf_load_addr = game_owns ? g_maze_addr : load_addr;
     wire                pf_start     = game_owns ? g_start     : start_search;
@@ -206,9 +184,6 @@ module arena_top #(
     wire [INDEX_W-1:0]  pf_goal_idx  = game_owns ? g_goal_idx  : goal_idx;
     wire                pf_step_en   = (game_owns || game_sw) ? 1'b1 : step_en;
 
-    // A wipe or a stopped run also resets the engines: they only accept start
-    // when idle or done (CONTRACT 4.1), so one left busy would carry on with its
-    // old search at the next BTNC.  sys_ctrl never reports either in GAME.
     reg pf_rst = 1'b0;
     always @(posedge clk) pf_rst <= rst || wipe_accept || abort_pulse;
     pathfind_top u_pathfind (
@@ -232,12 +207,11 @@ module arena_top #(
         .dfs_cycles(dfs_cycles),.dfs_expansions(dfs_exp)
     );
 
-    // ---------------- VGA: 1920x1080 @ 60 Hz on clk_pix (148.5 MHz) ----------------
+    // VGA
     localparam FRAC=20, OW=28, KW=16;
     wire clk_pix, pix_locked;
     vga_clkgen u_vga_clk (.clk(clk),.clk_pix(clk_pix),.locked(pix_locked));
 
-    // stretch the 1-cycle rst so the pixel domain samples it, then synchronise
     reg [3:0] rst_hold = 4'hF;
     always @(posedge clk)
         if (rst) rst_hold <= 4'hF; else if (rst_hold != 0) rst_hold <= rst_hold - 1'b1;
@@ -247,8 +221,6 @@ module arena_top #(
         rst_pix   <= rst_pix_m;
     end
 
-    // scroll-wheel zoom of the RUN view, one view per quadrant (100 MHz domain,
-    // next to the mouse); left click selects the quadrant the wheel zooms
     wire [4*OW-1:0] zoom_ox, zoom_oy;
     wire [4*KW-1:0] zoom_k;
     wire [4*3-1:0]  zoom_level;
@@ -262,8 +234,6 @@ module arena_top #(
         .sel(zoom_sel),.sel_valid(zoom_sel_valid)
     );
 
-    // everything the renderer needs from the 100 MHz side, moved across once per frame
-    // pellets left (0..192) as 3 BCD digits for the HUD
     function [11:0] bcd3; input [7:0] b;
         integer i; reg [19:0] t;
         begin
@@ -314,8 +284,6 @@ module arena_top #(
     wire [10:0] py;
     vga_timing u_vga_timing (.clk(clk_pix),.rst(rst_pix),.active_video(active_video),
         .x(px),.y(py),.hsync(hs),.vsync(vs),.view_tick(view_tick));
-    // The engines' cell_state ports and maze_ram's VGA ports are async LUTRAM
-    // reads addressed from clk_pix; all four engines share one cell address.
     vga_render #(.FRAC(FRAC),.OW(OW),.KW(KW)) u_vga_render (
         .clk(clk_pix),.rst(rst_pix),
         .x(px),.y(py),.active_video(active_video),.hsync_in(hs),.vsync_in(vs),
@@ -339,9 +307,7 @@ module arena_top #(
         .red(vga_r),.green(vga_g),.blue(vga_b),.hsync(vga_hs),.vsync(vga_vs)
     );
 
-    // Snapshot + finish order + decimal conversion for the OLED (CONTRACT 8):
-    // oled_stats registers everything in the 100 MHz domain; the 6.25 MHz
-    // screen reads only those registers and the view registers below.
+    // OLED
     wire [3:0]  snap_mask;
     wire [15:0] snap_status;
     wire [11:0] snap_place;
@@ -363,20 +329,16 @@ module arena_top #(
         .cyc_bcd(cyc_bcd),.exp_bcd(exp_bcd),.cost_bcd(cost_bcd),
         .gap_bcd(gap_bcd),.snap_order(snap_order)
     );
-    // OLED view: GAME score / demo engine selection (EDIT, maze generation) /
-    // demo results (LOAD..DONE).  Registered here: they change only on mode
-    // changes, switch flips or a pellet, so the 6.25 MHz side sees clean values.
     reg [1:0]  oled_view = 2'd0;
     reg [3:0]  oled_sel = 4'd0;
     reg [19:0] oled_score = 20'd0;
-    reg [2:0]  oled_page = 3'd0;     // sw[11:9]; 0 (automatic) in GAME
+    reg [2:0]  oled_page = 3'd0;
     always @(posedge clk) begin
-        oled_view  <= game_go ? 2'd2 : (mode == 3'd0 || mode == 3'd1 || mode == 3'd7) ? 2'd0 : 2'd1;
+        oled_view  <= game_go ? 2'd2 : 2'd0;
         oled_sel   <= sw_sync[5:2];
         oled_score <= g_score_bcd;
-        oled_page  <= game_go ? 3'd0 : sw_sync[11:9];
+        oled_page  <= game_go ? 3'd1 : (sw_sync[11:10] == 2'b11) ? 3'd0 : sw_sync[11:9];
     end
-    // page 011 shows oled_screen's ranked race results whatever the mode
     wire [1:0] screen_view = (oled_page == 3'd3) ? 2'd1 : oled_view;
     wire clk6p25m;
     wire [12:0] oled_pixel_index;
@@ -392,10 +354,6 @@ module arena_top #(
         oled_rst_meta <= |oled_rst_stretch;
         oled_rst_sync <= oled_rst_meta;
     end
-    // Performance graph (CONTRACT 8a): M2's sampler measures the demo run (never a
-    // GAME search) and ast_perf_hist stores it; M1's gv_oled_plot draws it on the
-    // OLED results view (below), reading the history through pg_rd_idx.  The
-    // timing labels come from oled_stats above (snap_order, cyc_bcd, gap_bcd).
     localparam PG_AW = `ARENA_PG_ADDR_W, PG_RW = `ARENA_PG_ROT_W, PG_LW = `ARENA_PG_LEVEL_W;
     wire               pg_we;
     wire [PG_AW-1:0]   pg_waddr, pg_count;
@@ -414,7 +372,7 @@ module arena_top #(
         .end_idx(pg_end),.end_valid(pg_end_valid),.mask(pg_mask),.plog(pg_plog),
         .dbg_best()
     );
-    wire [PG_AW-1:0]   pg_rd_idx;                   // from gv_oled_plot: sample under the pixel
+    wire [PG_AW-1:0]   pg_rd_idx;
     wire [4*PG_LW-1:0] pg_rd_level, pg_rd_prev;
     ast_perf_hist u_perf_hist (
         .clk(clk),.we(pg_we),.waddr(pg_waddr),.wdata(pg_wdata),.rot(pg_rot),
@@ -427,7 +385,6 @@ module arena_top #(
         .snap_order(snap_order),.cyc_bcd(cyc_bcd),.gap_bcd(gap_bcd),.score_bcd(oled_score),
         .pixel_data(screen_px)
     );
-    // demo results view (LOAD..DONE): M1's timing header + live performance graph
     wire [15:0] plot_px;
     gv_oled_plot u_gv_plot (
         .pixel_index(oled_pixel_index),.pixel_data(plot_px),
@@ -436,7 +393,6 @@ module arena_top #(
         .snap_mask(snap_mask),.snap_status(snap_status),.snap_place(snap_place),
         .snap_order(snap_order),.cyc_bcd(cyc_bcd),.gap_bcd(gap_bcd)
     );
-    // menu, points leaderboard and algorithm pages (M1); the points count demo races
     wire [15:0] menu_px;
     gv_oled_menu u_gv_menu (
         .clk(clk),.rst(rst),.start(start_search && !game_owns),.run_mask(run_mask),
@@ -447,10 +403,9 @@ module arena_top #(
     reg [15:0] page_px;
     always @* begin
         case (oled_page)
-            3'd1, 3'd4, 3'd5: page_px = menu_px;                 // menu / points / algorithms
-            3'd2:             page_px = plot_px;                 // graph
-            3'd3:             page_px = screen_px;               // race results (view forced to 1)
-            default:          page_px = (oled_view == 2'd1) ? plot_px : screen_px;   // automatic
+            3'd0, 3'd4, 3'd5: page_px = menu_px;
+            3'd2:             page_px = plot_px;
+            default:          page_px = screen_px;
         endcase
     end
     assign oled_pixel_data = page_px;
@@ -461,15 +416,13 @@ module arena_top #(
         .resn(oled_resn),.vccen(oled_vccen),.pmoden(oled_pmoden)
     );
 
-    // LEDs summarize each selected solver (off when not in the run, and dark
-    // in GAME mode, where the ghosts' searches would only flicker them);
-    // unused 7-segment display is dark (active-low).
+    // LEDs and 7-segment
     wire led_on = !game_go;
     assign led[2:0] = {bfs_found,bfs_done,bfs_busy} & {3{run_mask[0] && led_on}};
     assign led[5:3] = {dij_found,dij_done,dij_busy} & {3{run_mask[1] && led_on}};
     assign led[8:6] = {ast_found,ast_done,ast_busy} & {3{run_mask[2] && led_on}};
     assign led[11:9] = 3'b000;
-    assign led[14:12] = {dfs_found,dfs_done,dfs_busy} & {3{run_mask[3] && led_on}};   // M2's LEDs: DFS status
+    assign led[14:12] = {dfs_found,dfs_done,dfs_busy} & {3{run_mask[3] && led_on}};
     assign led[15] = mode[0];
     assign seg = 7'b1111111;
     assign dp = 1'b1;
