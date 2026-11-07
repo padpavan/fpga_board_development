@@ -121,13 +121,12 @@ module tb_arena_top;
   repeat(150) @(negedge clk);
   if(dut.oled_view!==2'd2 || dut.oled_score!==20'h00020) begin errors=errors+1; $display("FAIL: OLED game view"); end
   $display("  game: player at %0d, score %0d, ghost 0 at %0d", dut.g_player, dut.u_game.score, dut.g_ghosts[7:0]);
-  // sw[8] OLED mirror: the OLED shows oled_map, which owns the cell read port
+  // sw[8] (the removed OLED mirror) is unused: the OLED keeps its normal page and
+  // the engines' cell_state port keeps following the VGA
   sw[8]=1; repeat(4) @(negedge clk);
-  if(dut.oled_pixel_data!==dut.map_px || dut.view_cell!==dut.oled_cell) begin
-   errors=errors+1; $display("FAIL: sw[8] OLED mirror not selected"); end
+  if(dut.oled_pixel_data!==dut.screen_px || dut.u_pathfind.cell_rd_addr!==dut.maze_rd_addr) begin
+   errors=errors+1; $display("FAIL: sw[8] changed the OLED or the cell read port"); end
   sw[8]=0; repeat(4) @(negedge clk);
-  if(dut.oled_pixel_data!==dut.screen_px || dut.view_cell!==dut.maze_rd_addr) begin
-   errors=errors+1; $display("FAIL: sw[8]=0 should give the normal OLED page"); end
   // GAME searches must not reach the graph: still the masked run's samples
   if(dut.pg_mask!==4'b0101 || dut.u_perf.running!==1'b0 || dut.pg_count!==pg_count_before_game) begin
    errors=errors+1; $display("FAIL: GAME reached the graph"); end

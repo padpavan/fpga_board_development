@@ -11,15 +11,12 @@
 //         sys_ctrl is held in EDIT.  The game starts once the demo is in EDIT
 //         and no engine is busy, and it keeps the engines until its last
 //         search has finished after sw[6] goes off.
-//   sw[8] = 1: OLED mirror (testing without a monitor): the OLED shows the
-//         VGA picture as small maps (EDIT map / 4-engine race / game) via
-//         oled_map, which then owns the engines' cell_rd_addr and maze_ram's
-//         first VGA read port (the VGA overlay is wrong meanwhile).
 //   RUN view zoom (CONTRACT 9, v1.10): left click selects a quadrant (yellow
 //         border); the wheel zooms only that quadrant, middle click resets it.
 //   sw[11:9] (CONTRACT 8b, v1.10): OLED page.  000 automatic (as before),
 //         001 menu, 010 graph, 011 race results, 100 points, 101 algorithms.
-//         GAME always shows the score; the sw[8] mirror wins over every page.
+//         GAME always shows the score.  (The sw[8] OLED mirror was removed in
+//         v1.12: sw[8] is unused.)
 module arena_top #(
     parameter DEBOUNCE_LOCKOUT=20_000_000,
     parameter RESET_HOLD_CYCLES=3*`ARENA_CLK_HZ, // BTNU hold for a full reset (3 s); small in simulation
@@ -53,9 +50,6 @@ module arena_top #(
         sw_sync <= sw_meta;
     end
     wire game_sw = sw_sync[6];
-    wire oled_mirror = sw_sync[8];
-    wire [INDEX_W-1:0] oled_cell;               // oled_map's cell (mirror mode)
-    wire [INDEX_W-1:0] view_cell;               // cell read by maze_ram port 0 + engines' cell_state
     // rst: once at power-on (nothing else initialises the markers, the mouse
     // limits or the maze), then only from a long BTNU hold.  In GAME, BTNU is "up".
     reg [3:0] por_cnt = 4'hF;
@@ -126,7 +120,6 @@ module arena_top #(
         .mode(mode),.paused(paused),.run_mask(run_mask),
         .wipe_accept(wipe_accept),.abort_pulse(abort_pulse)
     );
-    assign view_cell = oled_mirror ? oled_cell : maze_rd_addr;
     // VGA read addresses / data (clk_pix domain): cell, up, down, left, right
     wire [INDEX_W-1:0] vga_up_addr, vga_dn_addr, vga_lf_addr, vga_rt_addr;
     wire [COST_W-1:0] vga_up_cost, vga_dn_cost, vga_lf_cost, vga_rt_cost;
@@ -134,7 +127,7 @@ module arena_top #(
         .clk(clk),.rst(rst),.we(gen_we || maze_we),
         .waddr(gen_we ? gen_addr : maze_waddr),.wdata(gen_we ? gen_data : maze_wdata),
         .raddr(pf_load_addr),.rdata(maze_load_cost),
-        .vga_addr0(view_cell),.vga_addr1(vga_up_addr),.vga_addr2(vga_dn_addr),
+        .vga_addr0(maze_rd_addr),.vga_addr1(vga_up_addr),.vga_addr2(vga_dn_addr),
         .vga_addr3(vga_lf_addr),.vga_addr4(vga_rt_addr),
         .vga_data0(maze_cost),.vga_data1(vga_up_cost),.vga_data2(vga_dn_cost),
         .vga_data3(vga_lf_cost),.vga_data4(vga_rt_cost)
@@ -220,7 +213,7 @@ module arena_top #(
     always @(posedge clk) pf_rst <= rst || wipe_accept || abort_pulse;
     pathfind_top u_pathfind (
         .clk(clk),.rst(pf_rst),.step_en(pf_step_en),.load_we(load_we_q),.load_addr(load_addr_q),.load_data(load_data_q),
-        .start(pf_start),.run_mask(pf_run_mask),.start_idx(pf_start_idx),.goal_idx(pf_goal_idx),.cell_rd_addr(view_cell),
+        .start(pf_start),.run_mask(pf_run_mask),.start_idx(pf_start_idx),.goal_idx(pf_goal_idx),.cell_rd_addr(maze_rd_addr),
         .bfs_busy(bfs_busy),.bfs_done(bfs_done),.bfs_found(bfs_found),.bfs_no_path(bfs_no_path),
         .bfs_path_rd_addr(g_path_addr),.bfs_path_rd_data(bfs_path),.bfs_path_cells(bfs_cells),
         .bfs_path_cost(bfs_cost),.bfs_current(bfs_current),.bfs_cell_state(bfs_state),
@@ -427,22 +420,12 @@ module arena_top #(
         .clk(clk),.we(pg_we),.waddr(pg_waddr),.wdata(pg_wdata),.rot(pg_rot),
         .rd_idx(pg_rd_idx),.rd_level(pg_rd_level),.rd_prev_level(pg_rd_prev)
     );
-    wire [15:0] screen_px, map_px;
+    wire [15:0] screen_px;
     oled_screen u_oled_screen (
         .pixel_index(oled_pixel_index),.view(screen_view),.sel(oled_sel),
         .snap_mask(snap_mask),.snap_status(snap_status),.snap_place(snap_place),
         .snap_order(snap_order),.cyc_bcd(cyc_bcd),.gap_bcd(gap_bcd),.score_bcd(oled_score),
         .pixel_data(screen_px)
-    );
-    // sw[8]: the VGA picture on the OLED (same view selection: 0 EDIT, 1 RUN, 2 GAME)
-    oled_map u_oled_map (
-        .pixel_index(oled_pixel_index),.view(oled_view),.cell_addr(oled_cell),.cell_cost(maze_cost),
-        .cell_state({dfs_state,ast_state,dij_state,bfs_state}),
-        .current({dfs_current,ast_current,dij_current,bfs_current}),
-        .busy({dfs_busy,ast_busy,dij_busy,bfs_busy}),.run_mask(run_mask),.place(snap_place),
-        .start_idx(start_idx),.goal_idx(goal_idx),.cursor_valid(cursor_valid),.cursor_idx(mouse_idx),
-        .player_pos(g_player),.player_dir(g_dir),.ghost_pos(g_ghosts),.ghost_present(g_ghost_present),
-        .pellet(g_pellet),.pixel_data(map_px)
     );
     // demo results view (LOAD..DONE): M1's timing header + live performance graph
     wire [15:0] plot_px;
@@ -470,7 +453,7 @@ module arena_top #(
             default:          page_px = (oled_view == 2'd1) ? plot_px : screen_px;   // automatic
         endcase
     end
-    assign oled_pixel_data = oled_mirror ? map_px : page_px;
+    assign oled_pixel_data = page_px;
     Oled_Display u_oled (
         .clk(clk6p25m),.reset(oled_rst_sync),.frame_begin(),.sending_pixels(),.sample_pixel(),
         .pixel_index(oled_pixel_index),.pixel_data(oled_pixel_data),
